@@ -1,0 +1,41 @@
+{
+  "name": "advanced-whatsapp-bot",
+  "version": "2.0.0",
+  "description": "Advanced modular WhatsApp bot with Telegram integration",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.6.0",
+    "axios": "^1.6.2",
+    "node-telegram-bot-api": "^0.64.0",
+    "pino": "^8.17.2",
+    "pino-pretty": "^10.3.1",
+    "qrcode-terminal": "^0.12.0",
+    "fs-extra": "^11.2.0",
+    "lodash": "^4.17.21",
+    "moment": "^2.29.4",
+    "rate-limiter-flexible": "^3.0.8",
+    "node-cron": "^3.0.3",
+    "uuid": "^9.0.1",
+    "sharp": "^0.33.1",
+    "ffmpeg-static": "^5.2.0",
+    "ytdl-core": "^4.11.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "telegram",
+    "modular",
+    "advanced"
+  ],
+  "author": "Sey",
+  "license": "MIT"
+}
