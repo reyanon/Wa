@@ -1,5 +1,5 @@
 const { AdvancedWhatsAppBot } = require('./core/bot');
-const logger = require('./middleware/logger');
+const logger = require('.core/logger');
 
 async function main() {
     try {
