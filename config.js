@@ -10,7 +10,7 @@ class Config {
                 company: 'Kairox',
                 prefix: '.',
                 version: '2.0.0',
-                owner: null
+                owner: 923298784489
             },
             features: {
                 mode: 'public', // public, private
