@@ -21,10 +21,10 @@ class Config {
             },
             telegram: {
                 enabled: true,
-                botToken: '7902063409:AAGJhJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ', // Replace with your bot token
-                chatId: '-1002345678901', // Replace with your group chat ID
+                botToken: '7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI', // Replace with your bot token
+                chatId: '-1002287300661', // Replace with your group chat ID
                 useTopics: true,
-                logChannel: '-1002345678901' // Same as chatId for logging
+                logChannel: '-1002287300661' // Same as chatId for logging
             },
             apis: {
                 ninjas: 'Fcc7UUfjRmEY0Q7jTUB5LQ==LJMBB9ING3SRvOrg',
