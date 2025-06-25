@@ -1,16 +1,18 @@
-const fs = require('fs-extra');
-const path = require('path');
+// No need for fs-extra or path as we are not reading/writing to a file
+// const fs = require('fs-extra');
+// const path = require('path');
 
 class Config {
     constructor() {
-        this.configPath = path.join(__dirname, 'settings.json');
+        // No longer using configPath, as we don't save/load from settings.json
+        // this.configPath = path.join(__dirname, 'settings.json'); 
         this.defaultConfig = {
             bot: {
                 name: 'Raven',
                 company: 'Kairox',
                 prefix: '.',
                 version: '2.0.0',
-                owner: 923298784489
+                owner: '923298784489@s.whatsapp.net' // Ensure owner is in JID format for WhatsApp
             },
             features: {
                 mode: 'public', // public, private
@@ -21,10 +23,10 @@ class Config {
             },
             telegram: {
                 enabled: true,
-                botToken: '7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI', // Replace with your bot token
-                chatId: '-1002287300661', // Replace with your group chat ID
-                useTopics: true,
-                logChannel: '-1002287300661' // Same as chatId for logging
+                botToken: '7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI', // Your actual bot token
+                chatId: '-1002287300661', // Your actual group chat ID
+                useTopics: true, // Set to false if your group doesn't use topics
+                logChannel: '-1002287300661' // Same as chatId for logging, or a different channel ID
             },
             apis: {
                 ninjas: 'Fcc7UUfjRmEY0Q7jTUB5LQ==LJMBB9ING3SRvOrg',
@@ -38,54 +40,33 @@ class Config {
                 blockedUsers: []
             },
             logging: {
-                level: 'info',
+                level: 'info', // Set to 'debug' during development to see all logs
                 saveToFile: true,
                 maxFileSize: '10MB',
                 maxFiles: 5
             }
         };
-        this.load();
+        // Directly load the default config into this.config
+        this.load(); 
     }
 
+    /**
+     * Loads the default configuration into the active config.
+     * With no settings.json, this simply uses the hardcoded defaultConfig.
+     */
     load() {
-        try {
-            if (fs.existsSync(this.configPath)) {
-                const data = fs.readJsonSync(this.configPath);
-                this.config = { ...this.defaultConfig, ...data };
-            } else {
-                this.config = { ...this.defaultConfig };
-                this.save();
-            }
-        } catch (error) {
-            console.error('Error loading config:', error);
-            this.config = { ...this.defaultConfig };
-        }
+        // The config is directly the default config now.
+        this.config = { ...this.defaultConfig };
+        console.log('Configuration loaded from defaultConfig in config.js.');
     }
 
-    save() {
-        try {
-            fs.writeJsonSync(this.configPath, this.config, { spaces: 2 });
-        } catch (error) {
-            console.error('Error saving config:', error);
-        }
-    }
+    /**
+     * There is no file to save to, so this method is removed.
+     * Any changes made via set() will be in-memory only and not persistent.
+     */
+    // save() {
+    //     // Removed file saving logic
+    // }
 
-    get(key) {
-        return key.split('.').reduce((o, k) => o && o[k], this.config);
-    }
-
-    set(key, value) {
-        const keys = key.split('.');
-        const lastKey = keys.pop();
-        const target = keys.reduce((o, k) => o[k] = o[k] || {}, this.config);
-        target[lastKey] = value;
-        this.save();
-    }
-
-    update(updates) {
-        this.config = { ...this.config, ...updates };
-        this.save();
-    }
-}
-
-module.exports = new Config();
+    /**
+     * Retrieves a configuration value us
