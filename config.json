@@ -1,1 +1,10 @@
-botToken: '7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI'
+{
+  "mongodb_uri": "mongodb+srv://irexanon:xUf7PCf9cvMHy8g6@rexdb.d9rwo.mongodb.net/?retryWrites=true&w=majority&appName=RexDB",
+  "botName": "Raven",
+  "companyName": "Kairox",
+  "commandPrefix": ".",
+  "ownerJid": "923298784489@s.whatsapp.net",
+  "botToken": "7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI",
+  "telegram_chat_id": "7405203657",
+  "port": 3000
+}
