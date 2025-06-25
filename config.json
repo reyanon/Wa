@@ -1,0 +1,7 @@
+{
+                enabled: true,
+                botToken: '7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI', // Replace with your bot token
+                chatId: '-1002287300661', // Replace with your group chat ID
+                useTopics: true,
+                logChannel: '-1002287300661' // Same as chatId for logging
+            }
