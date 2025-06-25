@@ -1,20 +1,20 @@
-# Use official Node.js LTS image
 FROM node:18-alpine
 
-# Set working directory in container
+# Install git and other dependencies
+RUN apk add --no-cache git python3 make g++
+
+# Create app directory
 WORKDIR /app
 
-# Copy package files first for caching dependencies
+# Install app dependencies
 COPY package*.json ./
-
-# Install dependencies
 RUN npm install
 
-# Copy your JS source code
+# Copy app source
 COPY . .
 
-# Expose port if your app runs on one (optional)
+# Expose the port (if your app uses one, like 3000)
 # EXPOSE 3000
 
-# Command to run your app
-CMD ["node", "index.js"]
+# Run the bot
+CMD ["npm", "start"]
