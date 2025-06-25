@@ -4,107 +4,158 @@ class MenuModule {
     constructor(bot) {
         this.bot = bot;
         this.name = 'Menu System';
-        this.version = '1.0.0';
+        this.version = '1.1.0'; // Updated version for dynamic functionality
         this.commands = [
             {
                 name: 'menu',
                 description: 'Display main menu',
                 usage: '.menu',
+                category: 'General', // Added category
                 execute: this.showMenu.bind(this)
             },
             {
                 name: 'help',
                 description: 'Show help information',
                 usage: '.help [command]',
+                category: 'General',
                 execute: this.showHelp.bind(this)
             },
             {
                 name: 'status',
                 description: 'Show bot status',
                 usage: '.status',
+                category: 'General',
                 execute: this.showStatus.bind(this)
             },
             {
                 name: 'modules',
                 description: 'List loaded modules',
                 usage: '.modules',
+                category: 'General',
                 execute: this.showModules.bind(this)
+            },
+            // Add a placeholder for settings command if it exists in another module
+            {
+                name: 'settings',
+                description: 'View/change bot settings',
+                usage: '.settings [key] [value]',
+                category: 'General',
+                // This command's execute function would be in a separate settings module
+                // For now, it will just show generic help if .settings module is not loaded
+                execute: async (msg, params, context) => {
+                    await context.bot.sendMessage(context.sender, { text: `Command ${config.get('bot.prefix')}settings is not implemented or its module is not loaded.` });
+                }
             }
         ];
+    }
+
+    // Helper to get all registered commands from MessageHandler
+    getAllRegisteredCommands() {
+        // Ensure MessageHandler is available and has the method
+        if (this.bot.messageHandler && typeof this.bot.messageHandler.getRegisteredCommands === 'function') {
+            // Convert Map to an array of command objects
+            return Array.from(this.bot.messageHandler.getRegisteredCommands().values());
+        }
+        return [];
     }
 
     async showMenu(msg, params, context) {
         const prefix = config.get('bot.prefix');
         const botName = config.get('bot.name');
         const version = config.get('bot.version');
-        
-        const menuText = `*🌌 ${botName.toUpperCase()} v${version} - COMMAND GALAXY 🌌*\n` +
+
+        let menuText = `*🌌 ${botName.toUpperCase()} v${version} - COMMAND GALAXY 🌌*\n` +
                         `_Advanced Modular WhatsApp Bot_\n` +
-                        `_Created by ${config.get('bot.company')}_\n\n` +
-                        `*🎨 GENERAL COMMANDS*\n` +
-                        `✨ *${prefix}menu* - Show this menu\n` +
-                        `✨ *${prefix}help* - Get help\n` +
-                        `✨ *${prefix}status* - Bot status\n` +
-                        `✨ *${prefix}modules* - List loaded modules\n` +
-                        `✨ *${prefix}settings* - View/change settings\n\n` +
-                        `*🌟 FUN & GAMES*\n` +
-                        `🎲 *${prefix}quote* - Random quote\n` +
-                        `🎲 *${prefix}joke* - Random joke\n` +
-                        `🎲 *${prefix}meme* - Random meme\n` +
-                        `🎲 *${prefix}trivia* - Trivia question\n` +
-                        `🎲 *${prefix}rps* <choice> - Rock Paper Scissors\n` +
-                        `🎲 *${prefix}dice* - Roll dice\n` +
-                        `🎲 *${prefix}coin* - Flip coin\n\n` +
-                        `*🛠️ UTILITIES*\n` +
-                        `🔧 *${prefix}weather* <city> - Weather info\n` +
-                        `🔧 *${prefix}translate* <text> to <lang> - Translate\n` +
-                        `🔧 *${prefix}qr* <text> - Generate QR code\n` +
-                        `🔧 *${prefix}reminder* <msg> in <minutes> - Set reminder\n\n` +
-                        `*👥 GROUP ADMIN*\n` +
-                        `🤝 *${prefix}kick* @user - Remove user\n` +
-                        `🤝 *${prefix}promote* @user - Make admin\n` +
-                        `🤝 *${prefix}demote* @user - Remove admin\n` +
-                        `🤝 *${prefix}tagall* - Tag everyone\n\n` +
-                        `*📥 DOWNLOADS*\n` +
-                        `⬇️ *${prefix}ytmp3* <url> - YouTube to MP3\n` +
-                        `⬇️ *${prefix}ytmp4* <url> - YouTube to MP4\n` +
-                        `⬇️ *${prefix}igdl* <url> - Instagram download\n` +
-                        `⬇️ *${prefix}tiktok* <url> - TikTok download\n\n` +
-                        `*🤖 TELEGRAM BRIDGE*\n` +
-                        `${config.get('telegram.enabled') ? '✅ Active' : '❌ Inactive'}\n` +
-                        `${config.get('telegram.enabled') ? `🔗 Connected to Telegram group` : `Use *${prefix}telegram setup* to configure`}\n\n` +
-                        `*⚙️ CURRENT STATUS*\n` +
-                        `• Mode: ${config.get('features.mode').toUpperCase()}\n` +
-                        `• Auto View: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n` +
-                        `• Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
-                        `• Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n\n` +
-                        `_Type *${prefix}help <command>* for detailed help!_`;
+                        `_Created by ${config.get('bot.company')}_\n\n`;
+
+        const registeredCommands = this.getAllRegisteredCommands();
+        const categorizedCommands = {};
+
+        // Organize commands by category
+        registeredCommands.forEach(cmd => {
+            const category = cmd.category || 'Uncategorized'; // Default category if not specified
+            if (!categorizedCommands[category]) {
+                categorizedCommands[category] = [];
+            }
+            categorizedCommands[category].push(cmd);
+        });
+
+        // Define a desired order for categories
+        const categoryOrder = [
+            'General', 'Fun & Games', 'Utilities', 'Group Admin', 'Downloads', 'Media', 'AI', 'Owner', 'Uncategorized'
+        ];
+
+        // Append commands by category
+        categoryOrder.forEach(category => {
+            if (categorizedCommands[category] && categorizedCommands[category].length > 0) {
+                // Determine icon based on category (you can expand this)
+                let icon = '✨'; // Default icon
+                switch(category) {
+                    case 'General': icon = '⚙️'; break;
+                    case 'Fun & Games': icon = '🎲'; break;
+                    case 'Utilities': icon = '🛠️'; break;
+                    case 'Group Admin': icon = '👥'; break;
+                    case 'Downloads': icon = '📥'; break;
+                    case 'Media': icon = '🖼️'; break;
+                    case 'AI': icon = '🧠'; break;
+                    case 'Owner': icon = '👑'; break;
+                }
+                menuText += `*${icon} ${category.toUpperCase()}*\n`;
+                // Sort commands alphabetically within each category for consistent display
+                categorizedCommands[category].sort((a, b) => a.name.localeCompare(b.name)).forEach(cmd => {
+                    menuText += `  ${icon} *${prefix}${cmd.name}* - ${cmd.description}\n`;
+                });
+                menuText += `\n`;
+            }
+        });
+
+        // Add the fixed sections that don't come from command modules
+        menuText += `*🤖 TELEGRAM BRIDGE*\n` +
+                    `${config.get('telegram.enabled') ? '✅ Active' : '❌ Inactive'}\n` +
+                    `${config.get('telegram.enabled') ? `🔗 Connected to Telegram group` : `Use *${prefix}telegram setup* to configure`}\n\n` +
+                    `*⚙️ CURRENT STATUS*\n` +
+                    `• Mode: ${config.get('features.mode').toUpperCase()}\n` +
+                    `• Auto View: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n` +
+                    `• Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
+                    `• Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n\n` +
+                    `_Type *${prefix}help <command>* for detailed help!_`;
 
         await context.bot.sendMessage(context.sender, { text: menuText });
     }
 
     async showHelp(msg, params, context) {
         const prefix = config.get('bot.prefix');
-        
+        const allCommands = this.getAllRegisteredCommands();
+        const commandMap = new Map(allCommands.map(cmd => [cmd.name.toLowerCase(), cmd]));
+
         if (params.length === 0) {
             const helpText = `*🆘 HELP SYSTEM*\n\n` +
-                           `*Usage:* ${prefix}help <command>\n` +
-                           `*Example:* ${prefix}help weather\n\n` +
-                           `*Available Commands:*\n` +
-                           `Type *${prefix}menu* to see all commands\n\n` +
-                           `*Need more help?*\n` +
-                           `• Check our documentation\n` +
-                           `• Join our support group\n` +
-                           `• Report issues on GitHub`;
+                             `*Usage:* ${prefix}help <command>\n` +
+                             `*Example:* ${prefix}help weather\n\n` +
+                             `*Available Commands:*\n` +
+                             `_Use ${prefix}menu to see the full list with descriptions._\n` +
+                             `_Currently registered:_ ${allCommands.map(c => `${prefix}${c.name}`).join(', ')}\n\n` +
+                             `*Need more help?*\n` +
+                             `• Check our documentation\n` +
+                             `• Join our support group\n` +
+                             `• Report issues on GitHub`;
             
             await context.bot.sendMessage(context.sender, { text: helpText });
         } else {
-            // Show help for specific command
-            const command = params[0].toLowerCase();
-            const helpText = `*📖 HELP: ${command.toUpperCase()}*\n\n` +
-                           `Command information will be displayed here based on the specific command requested.`;
+            const commandName = params[0].toLowerCase();
+            const command = commandMap.get(commandName);
             
-            await context.bot.sendMessage(context.sender, { text: helpText });
+            if (command) {
+                const helpText = `*📖 HELP: ${command.name.toUpperCase()}*\n\n` +
+                                 `*Description:* ${command.description}\n` +
+                                 `*Usage:* ${command.usage}\n` +
+                                 `${command.category ? `*Category:* ${command.category}\n` : ''}\n` +
+                                 `_For more commands, type ${prefix}menu_`;
+                
+                await context.bot.sendMessage(context.sender, { text: helpText });
+            } else {
+                await context.bot.sendMessage(context.sender, { text: `❌ Command *${prefix}${commandName}* not found. Type *${prefix}menu* for available commands.` });
+            }
         }
     }
 
@@ -115,33 +166,34 @@ class MenuModule {
         const seconds = Math.floor(uptime % 60);
         
         const statusText = `*🤖 BOT STATUS*\n\n` +
-                          `📊 *System Info:*\n` +
-                          `• Uptime: ${hours}h ${minutes}m ${seconds}s\n` +
-                          `• Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n` +
-                          `• Node.js: ${process.version}\n\n` +
-                          `⚙️ *Features:*\n` +
-                          `• Mode: ${config.get('features.mode').toUpperCase()}\n` +
-                          `• Auto View: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n` +
-                          `• Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
-                          `• Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n\n` +
-                          `📦 *Modules:* ${context.bot.loadedModules.size} loaded`;
+                            `📊 *System Info:*\n` +
+                            `• Uptime: ${hours}h ${minutes}m ${seconds}s\n` +
+                            `• Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n` +
+                            `• Node.js: ${process.version}\n\n` +
+                            `⚙️ *Features:*\n` +
+                            `• Mode: ${config.get('features.mode').toUpperCase()}\n` +
+                            `• Auto View: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n` +
+                            `• Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
+                            `• Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n\n` +
+                            `📦 *Modules:* ${context.bot.loadedModules.size} loaded`;
 
         await context.bot.sendMessage(context.sender, { text: statusText });
     }
 
     async showModules(msg, params, context) {
-        const modules = Array.from(context.bot.loadedModules.entries());
+        const modules = context.bot.moduleLoader.getLoadedModules(); // Get loaded modules from moduleLoader
         
         let moduleText = `*📦 LOADED MODULES*\n\n`;
         
-        modules.forEach(([id, info]) => {
-            moduleText += `🔧 *${info.instance.name}* v${info.instance.version}\n`;
-            moduleText += `   ID: ${id}\n`;
-            moduleText += `   Loaded: ${info.loaded.toLocaleString()}\n\n`;
-        });
-
         if (modules.length === 0) {
             moduleText += `❌ No modules loaded`;
+        } else {
+            modules.forEach(info => { // Iterate through the array returned by getLoadedModules()
+                moduleText += `🔧 *${info.name}* v${info.version}\n`;
+                moduleText += `    ID: ${info.id}\n`;
+                moduleText += `    Type: ${info.type}\n`; // Display module type (core/custom)
+                moduleText += `    Loaded: ${info.loaded.toLocaleString()}\n\n`;
+            });
         }
 
         await context.bot.sendMessage(context.sender, { text: moduleText });
