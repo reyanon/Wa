@@ -5,7 +5,7 @@
 class Config {
     constructor() {
         // No longer using configPath, as we don't save/load from settings.json
-        // this.configPath = path.join(__dirname, 'settings.json'); 
+        // this.configPath = path.join(__dirname, 'settings.json');
         this.defaultConfig = {
             bot: {
                 name: 'Raven',
@@ -29,7 +29,7 @@ class Config {
                 logChannel: '-1002287300661', // Same as chatId for logging, or a different channel I
                 settings: {
                     enableCallNotifications: false,
-                    autoUpdateProfilePics: true.
+                    autoUpdateProfilePics: true, // Added missing comma here
                     syncContacts: true,
                     syncStatus: true,
                     syncCalls: true
@@ -64,7 +64,7 @@ class Config {
             }
         };
         // Directly load the default config into this.config
-        this.load(); 
+        this.load();
     }
 
     /**
@@ -104,7 +104,7 @@ class Config {
             }
             return o[k];
         }, this.config);
-        
+
         // Set the value on the target object
         target[lastKey] = value;
         console.warn(`Config key '${key}' was set to '${value}' in memory. This change is NOT persistent across restarts.`);
@@ -127,6 +127,3 @@ class Config {
 
 // Export a singleton instance of the Config class
 module.exports = new Config();
-
-
-
