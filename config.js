@@ -27,6 +27,8 @@ class Config {
                 chatId: '-1002287300661', // Your actual group chat ID
                 useTopics: true, // Set to false if your group doesn't use topics
                 logChannel: '-1002287300661' // Same as chatId for logging, or a different channel ID
+                TELEGRAM_BRIDGE_DB_URI: 'mongodb+srv://itxelijah07:ivp8FYGsbVfjQOkj@cluster0.wh25x.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0'
+
             },
             apis: {
                 ninjas: 'Fcc7UUfjRmEY0Q7jTUB5LQ==LJMBB9ING3SRvOrg',
