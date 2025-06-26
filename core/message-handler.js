@@ -41,12 +41,6 @@ class MessageHandler {
             await this.handleProfilePictureUpdate(msg);
         }
 
-        // Handle call messages - Fixed call detection
-        if (msg.messageStubType && this.isCallMessage(msg.messageStubType)) {
-            await this.handleCallMessage(msg);
-            return; // Don't process call messages further
-        }
-
         // Handle command
         const prefix = config.get('bot.prefix');
         if (text && text.startsWith(prefix)) {
@@ -150,54 +144,27 @@ class MessageHandler {
         // Sync status updates to Telegram
         if (this.bot.telegramBridge && config.get('telegram.settings.syncStatus')) {
             try {
-                await this.bot.telegramBridge.syncMessage(msg, text || 'Status update');
+                // Create enhanced status message with user info
+                const participant = msg.key.participant;
+                const userInfo = this.bot.telegramBridge.userMappings.get(participant);
+                const userName = userInfo?.name || participant?.split('@')[0] || 'Unknown';
+                const userPhone = participant?.split('@')[0] || 'Unknown';
+                
+                // Create status message with user details
+                const enhancedStatusMsg = {
+                    ...msg,
+                    key: { ...msg.key, remoteJid: 'status@broadcast' },
+                    statusUser: {
+                        name: userName,
+                        phone: userPhone,
+                        participant: participant
+                    }
+                };
+
+                await this.bot.telegramBridge.syncMessage(enhancedStatusMsg, text || 'Status update');
             } catch (error) {
                 logger.error('❌ Error syncing status update to Telegram:', error);
             }
-        }
-    }
-
-    async handleCallMessage(msg) {
-        if (!this.bot.telegramBridge || !config.get('telegram.settings.syncCalls')) return;
-
-        const callType = this.getCallType(msg.messageStubType);
-        const participant = msg.key.participant || msg.key.remoteJid;
-        const participantName = participant.split('@')[0];
-
-        // Create a call message for Telegram sync
-        const callMessage = {
-            ...msg,
-            key: { ...msg.key, remoteJid: 'call@broadcast' },
-            message: {
-                conversation: `${callType} call from ${participantName}`
-            }
-        };
-
-        try {
-            await this.bot.telegramBridge.syncMessage(callMessage, `${callType} call from ${participantName}`);
-            logger.debug(`📞 Synced ${callType} call from ${participantName} to Telegram`);
-        } catch (error) {
-            logger.error('❌ Error handling call message:', error);
-        }
-    }
-
-    isCallMessage(stubType) {
-        // WhatsApp call message stub types
-        const callTypes = [1, 2, 3, 4, 5, 6, 7, 8];
-        return callTypes.includes(stubType);
-    }
-
-    getCallType(stubType) {
-        switch (stubType) {
-            case 1: return 'Missed voice';
-            case 2: return 'Outgoing voice';
-            case 3: return 'Incoming voice';
-            case 4: return 'Missed video';
-            case 5: return 'Outgoing video';
-            case 6: return 'Incoming video';
-            case 7: return 'Rejected';
-            case 8: return 'Group call';
-            default: return 'Unknown';
         }
     }
 
