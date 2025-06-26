@@ -55,7 +55,7 @@ class TelegramBridge {
             return;
         }
 
-        // Validate bot token before initializing
+        // Validate bot token
         try {
             const response = await axios.get(`https://api.telegram.org/bot${token}/getMe`);
             if (!response.data.ok) {
@@ -71,7 +71,7 @@ class TelegramBridge {
         while (retries > 0) {
             try {
                 if (this.telegramBot) {
-                    await this.telegramBot.stop(); // Ensure previous instance is stopped
+                    await this.telegramBot.stop();
                 }
                 this.telegramBot = new TelegramBridgeBot(token, this);
                 await this.telegramBot.initialize();
@@ -82,7 +82,9 @@ class TelegramBridge {
                 return;
             } catch (error) {
                 logger.error(`❌ Failed to initialize Telegram bridge (attempt ${4 - retries}):`, error);
-                if (error.message.includes('409')) {
+                if (error.message.includes('404')) {
+                    logger.error('❌ 404 Not Found: Check bot permissions in supergroup or network connectivity');
+                } else if (error.message.includes('409')) {
                     logger.warn('⚠️ 409 Conflict detected, attempting to clear polling session');
                     await axios.get(`https://api.telegram.org/bot${token}/getUpdates?offset=-1`);
                 }
@@ -91,7 +93,7 @@ class TelegramBridge {
                     logger.error('❌ Max retries reached, bridge initialization failed');
                     throw error;
                 }
-                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+                await new Promise(resolve => setTimeout(resolve, 5000));
             }
         }
     }
@@ -99,7 +101,7 @@ class TelegramBridge {
     async loadMappingsFromDatabase() {
         try {
             const mappings = await this.database.getAllTopicMappings();
-            this.chatMappings.clear(); // Clear to avoid duplicates
+            this.chatMappings.clear();
             for (const mapping of mappings) {
                 this.chatMappings.set(mapping.whatsappJid, mapping.telegramTopicId);
             }
@@ -112,7 +114,6 @@ class TelegramBridge {
     async createSystemTopics() {
         const chatId = config.get('telegram.chatId');
         try {
-            // Check for existing system topics
             const existingTopics = await this.database.getSystemTopicMappings();
             for (const topic of existingTopics) {
                 if (topic.topicName === '📱 Status Updates') {
@@ -122,7 +123,6 @@ class TelegramBridge {
                 }
             }
 
-            // Create Status Updates topic if not exists
             if (!this.systemTopics.status) {
                 try {
                     const statusTopic = await this.telegramBot.createForumTopic(chatId, '📱 Status Updates', {
@@ -143,7 +143,6 @@ class TelegramBridge {
                 }
             }
 
-            // Create Calls & Notifications topic if not exists
             if (!this.systemTopics.calls) {
                 try {
                     const callsTopic = await this.telegramBot.createForumTopic(chatId, '📞 Calls & Notifications', {
@@ -178,7 +177,7 @@ class TelegramBridge {
 
             for (const mapping of mappings) {
                 if (mapping.topicName === '📱 Status Updates' || mapping.topicName === '📞 Calls & Notifications') {
-                    continue; // Skip system topics
+                    continue;
                 }
                 if (now - new Date(mapping.lastActivity) > inactiveThreshold) {
                     await this.telegramBot.closeForumTopic(config.get('telegram.chatId'), mapping.telegramTopicId);
@@ -227,7 +226,7 @@ class TelegramBridge {
     async handleStatusCommand(msg, params, context) {
         const statusMessage = `📊 *Telegram Bridge Status*\n\n` +
                              `🔗 Bridge: ${this.bridgeEnabled ? '✅ Active' : '❌ Inactive'}\n` +
-                             `🤖 Telegram Bot: ${this.telegramBot ? '✅ Connected' : '❌ Disconnected'}\n` +
+                             `🤖 Telegram Bot: ${this.telegramBot?.isPolling ? '✅ Connected' : '❌ Disconnected'}\n` +
                              `📊 Database: ${this.database.isConnected ? '✅ Connected' : '❌ Disconnected'}\n` +
                              `💬 Active Chats: ${this.chatMappings.size}\n` +
                              `👥 Cached Users: ${this.userMappings.size}\n` +
@@ -387,7 +386,6 @@ class TelegramBridge {
                 profilePicUrl = userInfo ? userInfo.profilePicUrl : '';
             }
 
-            // Check database for existing topic with same name
             const existingMapping = await this.database.getTopicMappingByName(topicName);
             if (existingMapping) {
                 this.chatMappings.set(chatJid, existingMapping.telegramTopicId);
@@ -735,4 +733,15 @@ class TelegramBridge {
     }
 }
 
-module.exports = TelegramBridge;
+// Export as a module object for compatibility with module loader
+module.exports = {
+    name: 'telegram-bridge',
+    version: '2.0.0',
+    description: 'Advanced WhatsApp-Telegram Bridge with full control panel',
+    commands: ['tgbridge', 'status'],
+    run: async (bot, options) => {
+        const bridge = new TelegramBridge(bot);
+        await bridge.init();
+        return bridge;
+    }
+};
