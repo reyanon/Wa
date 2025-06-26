@@ -145,7 +145,12 @@ class TelegramBridge {
             await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
         } else if (whatsappMsg.message?.stickerMessage) {
             await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
-        } else if (text) {
+        } else if (whatsappMsg.message?.locationMessage) { // New: Handle location messages from WhatsApp
+            await this.handleWhatsAppLocation(whatsappMsg, topicId);
+        } else if (whatsappMsg.message?.contactMessage) { // New: Handle contact messages from WhatsApp
+            await this.handleWhatsAppContact(whatsappMsg, topicId);
+        }
+        else if (text) {
             // Send text message
             await this.sendSimpleMessage(topicId, text);
         }
@@ -214,6 +219,8 @@ class TelegramBridge {
                 try {
                     const groupMeta = await this.whatsappBot.sock.groupMetadata(chatJid);
                     topicName = `${groupMeta.subject}`;
+                    // Attempt to send group profile picture when topic is created
+                    await this.sendProfilePicture(topic.message_thread_id, chatJid, false);
                 } catch (error) {
                     topicName = `Group Chat`;
                 }
@@ -275,6 +282,7 @@ class TelegramBridge {
         try {
             let mediaMessage;
             let fileName = `media_${Date.now()}`;
+            let caption = this.extractText(whatsappMsg); // Extract caption if available
             
             switch (mediaType) {
                 case 'image':
@@ -312,46 +320,61 @@ class TelegramBridge {
             switch (mediaType) {
                 case 'image':
                     await this.telegramBot.sendPhoto(chatId, filePath, {
-                        message_thread_id: topicId
+                        message_thread_id: topicId,
+                        caption: caption
                     });
                     break;
                     
                 case 'video':
                     await this.telegramBot.sendVideo(chatId, filePath, {
-                        message_thread_id: topicId
+                        message_thread_id: topicId,
+                        caption: caption
                     });
                     break;
                     
                 case 'audio':
                     if (mediaMessage.ptt) {
-                        // Convert to voice message
+                        // Send as voice message
                         await this.telegramBot.sendVoice(chatId, filePath, {
-                            message_thread_id: topicId
+                            message_thread_id: topicId,
+                            caption: caption
                         });
                     } else {
                         await this.telegramBot.sendAudio(chatId, filePath, {
-                            message_thread_id: topicId
+                            message_thread_id: topicId,
+                            caption: caption
                         });
                     }
                     break;
                     
                 case 'document':
                     await this.telegramBot.sendDocument(chatId, filePath, {
-                        message_thread_id: topicId
+                        message_thread_id: topicId,
+                        caption: caption
                     });
                     break;
                     
                 case 'sticker':
-                    // Convert WebP to PNG for Telegram
-                    const pngPath = filePath.replace('.webp', '.png');
-                    await sharp(filePath).png().toFile(pngPath);
-                    
-                    await this.telegramBot.sendPhoto(chatId, pngPath, {
-                        message_thread_id: topicId
-                    });
-                    
-                    // Clean up PNG file
-                    await fs.unlink(pngPath).catch(() => {});
+                    // Check if it's an animated WebP and Telegram can send it directly
+                    // This is a simplification; robust animated sticker handling is complex.
+                    const isAnimatedWebP = buffer.slice(0, 12).toString('ascii').includes('ANIM');
+                    if (!isAnimatedWebP) { // Assume static WebP can be sent as photo for now
+                         const pngPath = filePath.replace('.webp', '.png');
+                        await sharp(filePath).png().toFile(pngPath);
+                        
+                        await this.telegramBot.sendPhoto(chatId, pngPath, {
+                            message_thread_id: topicId,
+                            caption: caption // Stickers can have captions
+                        });
+                        await fs.unlink(pngPath).catch(() => {});
+                    } else {
+                        // For animated WebP, send as a document or inform user
+                        await this.telegramBot.sendDocument(chatId, filePath, {
+                            message_thread_id: topicId,
+                            caption: (caption ? caption + '\n' : '') + 'Animated sticker (animation not preserved)',
+                            filename: fileName
+                        });
+                    }
                     break;
             }
 
@@ -363,9 +386,46 @@ class TelegramBridge {
         }
     }
 
+    async handleWhatsAppLocation(whatsappMsg, topicId) {
+        try {
+            const locationMessage = whatsappMsg.message.locationMessage;
+            await this.telegramBot.sendLocation(config.get('telegram.chatId'), 
+                locationMessage.degreesLatitude, 
+                locationMessage.degreesLongitude, {
+                    message_thread_id: topicId,
+                    title: locationMessage.name || locationMessage.address,
+                    address: locationMessage.address
+                });
+        } catch (error) {
+            logger.error('❌ Failed to handle WhatsApp location message:', error);
+        }
+    }
+
+    async handleWhatsAppContact(whatsappMsg, topicId) {
+        try {
+            const contactMessage = whatsappMsg.message.contactMessage;
+            const vcard = contactMessage.vcard;
+            const displayName = contactMessage.displayName || 'Unknown Contact';
+
+            await this.telegramBot.sendDocument(config.get('telegram.chatId'), Buffer.from(vcard), {
+                message_thread_id: topicId,
+                caption: `Contact: ${displayName}`,
+                fileName: `${displayName}.vcf`,
+                mimetype: 'text/vcard'
+            });
+        } catch (error) {
+            logger.error('❌ Failed to handle WhatsApp contact message:', error);
+        }
+    }
+
     async handleTelegramMessage(msg) {
-        // Only handle text messages here, media is handled separately
-        if (!msg.text) return;
+        // If the message contains any media, it should have been handled by specific media listeners.
+        // This prevents captions of media from being re-sent as text messages.
+        if (msg.photo || msg.video || msg.video_note || msg.voice || msg.audio || msg.document || msg.sticker) {
+            return; // Media message, do not process as text here
+        }
+
+        if (!msg.text) return; // Only process text if no media is present
         
         try {
             const topicId = msg.message_thread_id;
@@ -379,8 +439,8 @@ class TelegramBridge {
             // Send to WhatsApp
             await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
             
-            // React with checkmark for confirmation
-            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '✅' }]);
+            // Removed: Confirmation reaction
+            // await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '✅' }]);
 
         } catch (error) {
             logger.error('❌ Failed to handle Telegram message:', error);
@@ -403,7 +463,7 @@ class TelegramBridge {
                 return;
             }
 
-            let fileId, fileName;
+            let fileId, fileName, caption = msg.caption || '';
             
             switch (mediaType) {
                 case 'photo':
@@ -432,7 +492,14 @@ class TelegramBridge {
                     break;
                 case 'sticker':
                     fileId = msg.sticker.file_id;
-                    fileName = `sticker_${Date.now()}.webp`;
+                    // For animated stickers (.tgs), Telegram will send a WebP representation to download
+                    // If it's a regular WebP sticker, it will be handled as such.
+                    // WhatsApp doesn't directly support .tgs, so we convert.
+                    if (msg.sticker.is_animated || msg.sticker.is_video) {
+                        fileName = `sticker_${Date.now()}.mp4`; // Convert animated/video sticker to MP4
+                    } else {
+                        fileName = `sticker_${Date.now()}.webp`;
+                    }
                     break;
             }
 
@@ -448,7 +515,8 @@ class TelegramBridge {
             switch (mediaType) {
                 case 'photo':
                     await this.whatsappBot.sendMessage(whatsappJid, {
-                        image: { url: filePath }
+                        image: { url: filePath },
+                        caption: caption
                     });
                     break;
                     
@@ -456,18 +524,20 @@ class TelegramBridge {
                 case 'video_note':
                     if (mediaType === 'video_note') {
                         // Convert video note to regular video for WhatsApp
-                        const convertedPath = path.join(this.tempDir, `converted_${fileName}`);
+                        const convertedPath = path.join(this.tempDir, `converted_${Date.now()}.mp4`);
                         await this.convertVideoNote(filePath, convertedPath);
                         
                         await this.whatsappBot.sendMessage(whatsappJid, {
                             video: { url: convertedPath },
-                            ptv: true // Send as PTV (video note)
+                            ptv: true, // Send as PTV (video note)
+                            caption: caption
                         });
                         
                         await fs.unlink(convertedPath).catch(() => {});
                     } else {
                         await this.whatsappBot.sendMessage(whatsappJid, {
-                            video: { url: filePath }
+                            video: { url: filePath },
+                            caption: caption
                         });
                     }
                     break;
@@ -487,7 +557,10 @@ class TelegramBridge {
                     
                 case 'audio':
                     await this.whatsappBot.sendMessage(whatsappJid, {
-                        audio: { url: filePath }
+                        audio: { url: filePath },
+                        mimetype: mime.lookup(fileName) || 'audio/mp3',
+                        fileName: fileName,
+                        caption: caption
                     });
                     break;
                     
@@ -495,22 +568,37 @@ class TelegramBridge {
                     await this.whatsappBot.sendMessage(whatsappJid, {
                         document: { url: filePath },
                         fileName: fileName,
-                        mimetype: mime.lookup(fileName) || 'application/octet-stream'
+                        mimetype: mime.lookup(fileName) || 'application/octet-stream',
+                        caption: caption
                     });
                     break;
                     
                 case 'sticker':
-                    await this.whatsappBot.sendMessage(whatsappJid, {
-                        sticker: { url: filePath }
-                    });
+                    if (msg.sticker.is_animated || msg.sticker.is_video) {
+                        // Convert animated/video sticker to MP4 for WhatsApp
+                        const convertedVideoPath = path.join(this.tempDir, `converted_sticker_${Date.now()}.mp4`);
+                        await this.convertAnimatedStickerToVideo(filePath, convertedVideoPath);
+
+                        await this.whatsappBot.sendMessage(whatsappJid, {
+                            video: { url: convertedVideoPath },
+                            gifPlayback: true, // Attempt to play as GIF
+                            caption: (caption ? caption + '\n' : '') + ' [Animated Sticker]'
+                        });
+                        await fs.unlink(convertedVideoPath).catch(() => {});
+                    } else {
+                        // Send static WebP sticker directly
+                        await this.whatsappBot.sendMessage(whatsappJid, {
+                            sticker: { url: filePath }
+                        });
+                    }
                     break;
             }
 
             // Clean up temp file
             await fs.unlink(filePath).catch(() => {});
             
-            // React with checkmark for confirmation
-            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '✅' }]);
+            // Removed: Confirmation reaction
+            // await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '✅' }]);
 
         } catch (error) {
             logger.error(`❌ Failed to handle Telegram ${mediaType}:`, error);
@@ -529,6 +617,7 @@ class TelegramBridge {
                 .videoCodec('libx264')
                 .audioCodec('aac')
                 .format('mp4')
+                .outputOptions('-movflags +faststart') // Optimize for web streaming
                 .on('end', resolve)
                 .on('error', reject)
                 .save(outputPath);
@@ -542,8 +631,26 @@ class TelegramBridge {
                 .format('ogg')
                 .audioChannels(1)
                 .audioFrequency(16000)
+                .audioBitrate('24k') // Optimized bitrate for WhatsApp voice notes
                 .on('end', resolve)
                 .on('error', reject)
+                .save(outputPath);
+        });
+    }
+
+    async convertAnimatedStickerToVideo(inputPath, outputPath) {
+        return new Promise((resolve, reject) => {
+            ffmpeg(inputPath)
+                .videoCodec('libx264')
+                .outputOptions([
+                    '-pix_fmt yuv420p', // Pixel format for broader compatibility
+                    '-vf scale=512:-1', // Scale to a reasonable size if needed (e.g., 512px width)
+                    '-crf 28', // Constant Rate Factor for quality-controlled compression
+                    '-preset veryfast' // Faster encoding
+                ])
+                .toFormat('mp4')
+                .on('end', () => resolve())
+                .on('error', (err) => reject(err))
                 .save(outputPath);
         });
     }
@@ -579,6 +686,15 @@ class TelegramBridge {
         return null;
     }
 
+    // Helper to extract text from whatsapp message for captions
+    extractText(msg) {
+        return msg.message?.conversation ||
+               msg.message?.extendedTextMessage?.text ||
+               msg.message?.imageMessage?.caption ||
+               msg.message?.videoMessage?.caption ||
+               '';
+    }
+
     async syncWhatsAppConnection() {
         if (!this.telegramBot) return;
 
@@ -590,17 +706,24 @@ class TelegramBridge {
     }
 
     async shutdown() {
+        logger.info('🛑 Shutting down Telegram bridge...');
         if (this.telegramBot) {
-            await this.telegramBot.stopPolling();
-            logger.info('📱 Telegram bridge stopped');
+            // It's good practice to stop polling explicitly
+            // However, node-telegram-bot-api's stopPolling might not be strictly necessary for clean exit
+            // as it's often handled internally on process exit or when the instance is garbage collected.
+            // But if you want to be explicit:
+            // this.telegramBot.stopPolling();
+            logger.info('📱 Telegram bot polling stopped.');
         }
         
         // Clean up temp directory
         try {
             await fs.emptyDir(this.tempDir);
+            logger.info('🧹 Temp directory cleaned.');
         } catch (error) {
             logger.debug('Could not clean temp directory:', error);
         }
+        logger.info('✅ Telegram bridge shutdown complete.');
     }
 }
 
