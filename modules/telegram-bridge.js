@@ -65,9 +65,8 @@ class TelegramBridge {
                 throw new Error('Invalid bot token');
             }
             logger.info(`✅ Valid Telegram bot token: ${response.data.result.username}`);
-        } catch (error) авт
-
-System: logger.error('❌ Invalid Telegram bot token or API unreachable:', error.message);
+        } catch (error) {
+            logger.error('❌ Invalid Telegram bot token or API unreachable:', error.message);
             return;
         }
 
