@@ -28,7 +28,7 @@ class Config {
                 useTopics: true, // Set to false if your group doesn't use topics
                 logChannel: '-1002287300661', // Same as chatId for logging, or a different channel I
                 settings: {
-                    enableCallNotifications: false,
+                    enableCallNotifications: true,
                     autoUpdateProfilePics: true, // Added missing comma here
                     syncContacts: true,
                     syncStatus: true,
