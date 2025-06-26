@@ -26,8 +26,7 @@ class Config {
                 botToken: '7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI', // Your actual bot token
                 chatId: '-1002287300661', // Your actual group chat ID
                 useTopics: true, // Set to false if your group doesn't use topics
-                logChannel: '-1002287300661' // Same as chatId for logging, or a different channel ID
-                TELEGRAM_BRIDGE_DB_URI: 'mongodb+srv://itxelijah07:ivp8FYGsbVfjQOkj@cluster0.wh25x.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0'
+                logChannel: '-1002287300661' // Same as chatId for logging, or a different channel I
 
             },
             apis: {
