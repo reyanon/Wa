@@ -6,7 +6,7 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const TelegramBridge = require('../modules/telegram-bridge');
+const TelegramBridge = require('./telegram-bridge');
 
 class AdvancedWhatsAppBot {
     constructor() {
@@ -148,41 +148,23 @@ class AdvancedWhatsAppBot {
         this.sock.ev.on('creds.update', saveCreds);
         this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
         
-        // Listen for call events
-        this.sock.ev.on('call', async (callEvents) => {
-            for (const call of callEvents) {
-                await this.handleCallEvent(call);
-            }
-        });
+        // Listen for call events - only if real-time detection is enabled
+        if (config.get('telegram.settings.enableCallNotifications', true)) {
+            this.sock.ev.on('call', async (callEvents) => {
+                for (const call of callEvents) {
+                    await this.handleCallEvent(call);
+                }
+            });
+        }
     }
 
     async handleCallEvent(call) {
-        if (!this.telegramBridge || !config.get('telegram.settings.syncCalls')) return;
+        if (!this.telegramBridge) return;
 
         try {
-            const callType = call.status === 'offer' ? 'Incoming' : 
-                           call.status === 'accept' ? 'Accepted' : 
-                           call.status === 'reject' ? 'Rejected' : 'Unknown';
-            
-            const isVideo = call.isVideo ? 'video' : 'voice';
-            const caller = call.from.split('@')[0];
-            
-            // Create call message for Telegram sync
-            const callMessage = {
-                key: { 
-                    remoteJid: 'call@broadcast',
-                    participant: call.from,
-                    fromMe: false,
-                    id: `call_${Date.now()}`
-                },
-                message: {
-                    conversation: `${callType} ${isVideo} call from ${caller}`
-                },
-                messageTimestamp: Math.floor(Date.now() / 1000)
-            };
-
-            await this.telegramBridge.syncMessage(callMessage, `${callType} ${isVideo} call from ${caller}`);
-            logger.debug(`📞 Synced ${callType} ${isVideo} call from ${caller} to Telegram`);
+            // Pass call event to telegram bridge for handling
+            await this.telegramBridge.handleCallNotification(call);
+            logger.debug(`📞 Handled call event: ${call.status} from ${call.from.split('@')[0]}`);
         } catch (error) {
             logger.error('❌ Error handling call event:', error);
         }
@@ -217,7 +199,7 @@ class AdvancedWhatsAppBot {
                               `• 🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
                               `• 🔧 Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n` +
                               `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n` +
-                              `• 📞 Call Notifications: ${config.get('telegram.settings.syncCalls') ? '✅' : '❌'}\n` +
+                              `• 📞 Call Notifications: ${config.get('telegram.settings.enableCallNotifications', true) ? '✅' : '❌'}\n` +
                               `• 📊 Status Sync: ${config.get('telegram.settings.syncStatus') ? '✅' : '❌'}\n\n` +
                               `Type *${config.get('bot.prefix')}menu* to see all commands!`;
 
