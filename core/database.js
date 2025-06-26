@@ -70,9 +70,9 @@ class Database {
 
         try {
             const uri = config.get('database.mongodb.uri');
-            const options = config.get('database.mongodb.options');
             
-            await mongoose.connect(uri, options);
+            // Remove deprecated options
+            await mongoose.connect(uri);
             this.isConnected = true;
             logger.info('📊 Connected to MongoDB');
             
