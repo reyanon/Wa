@@ -39,14 +39,18 @@ class TelegramBridge {
 
     async init() {
         try {
+            logger.info('🔧 Initializing TelegramBridge...');
             await this.database.connect();
+            logger.info('✅ Database connected');
             await this.initialize();
         } catch (error) {
-            logger.error('❌ Failed to initialize Telegram bridge:', error);
+            logger.error('❌ Failed to initialize TelegramBridge:', error);
+            throw error; // Rethrow to catch in run
         }
     }
 
     async initialize() {
+        logger.info('🔄 Starting TelegramBridge initialization...');
         const token = config.get('telegram.botToken');
         const chatId = config.get('telegram.chatId');
         if (!token || token.includes('JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ') || 
@@ -55,7 +59,6 @@ class TelegramBridge {
             return;
         }
 
-        // Validate bot token
         try {
             const response = await axios.get(`https://api.telegram.org/bot${token}/getMe`);
             if (!response.data.ok) {
@@ -400,7 +403,8 @@ class TelegramBridge {
             this.chatMappings.set(chatJid, topic.message_thread_id);
             
             await this.database.saveTopicMapping({
-                whatsappJid: chatJid,
+                whatsappJid: ch
+System: atJid,
                 telegramTopicId: topic.message_thread_id,
                 topicName,
                 isGroup,
@@ -733,15 +737,21 @@ class TelegramBridge {
     }
 }
 
-// Export as a module object for compatibility with module loader
 module.exports = {
     name: 'telegram-bridge',
     version: '2.0.0',
     description: 'Advanced WhatsApp-Telegram Bridge with full control panel',
     commands: ['tgbridge', 'status'],
     run: async (bot, options) => {
-        const bridge = new TelegramBridge(bot);
-        await bridge.init();
-        return bridge;
+        try {
+            logger.info('🚀 Running telegram-bridge module...');
+            const bridge = new TelegramBridge(bot);
+            await bridge.init();
+            logger.info('✅ telegram-bridge module initialized');
+            return bridge;
+        } catch (error) {
+            logger.error('❌ Error in telegram-bridge run:', error);
+            throw error;
+        }
     }
 };
