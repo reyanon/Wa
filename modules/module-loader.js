@@ -1,12 +1,12 @@
 const fs = require('fs-extra');
 const path = require('path');
-const logger = require('../core/logger');
+const logger = require('./logger'); // Fixed path
 
 class ModuleLoader {
     constructor(bot) {
         this.bot = bot;
         this.loadedModules = new Map();
-        this.modulesPath = path.join(__dirname, '.');
+        this.modulesPath = path.join(__dirname, '../modules');
         this.customModulesPath = path.join(this.modulesPath, 'custom-modules');
     }
 
@@ -27,32 +27,39 @@ class ModuleLoader {
     }
 
     async loadCoreModules() {
-        try {
-            const files = await fs.readdir(this.modulesPath);
-            
-            for (const file of files) {
-                if (file.endsWith('.js') && file !== 'module-loader.js') {
-                    await this.loadModule(path.join(this.modulesPath, file), 'core');
-                }
+        const coreModuleDirs = [
+            'general',
+            'fun', 
+            'utilities',
+            'admin',
+            'downloads'
+        ];
+
+        for (const dir of coreModuleDirs) {
+            const dirPath = path.join(this.modulesPath, dir);
+            if (await fs.pathExists(dirPath)) {
+                await this.loadModulesFromDirectory(dirPath, 'core');
             }
-        } catch (error) {
-            logger.error(`Error loading core modules:`, error);
         }
     }
 
     async loadCustomModules() {
         if (await fs.pathExists(this.customModulesPath)) {
-            try {
-                const files = await fs.readdir(this.customModulesPath);
-                
-                for (const file of files) {
-                    if (file.endsWith('.js')) {
-                        await this.loadModule(path.join(this.customModulesPath, file), 'custom');
-                    }
+            await this.loadModulesFromDirectory(this.customModulesPath, 'custom');
+        }
+    }
+
+    async loadModulesFromDirectory(dirPath, type) {
+        try {
+            const files = await fs.readdir(dirPath);
+            
+            for (const file of files) {
+                if (file.endsWith('.js')) {
+                    await this.loadModule(path.join(dirPath, file), type);
                 }
-            } catch (error) {
-                logger.error(`Error loading custom modules:`, error);
             }
+        } catch (error) {
+            logger.error(`Error loading modules from ${dirPath}:`, error);
         }
     }
 
