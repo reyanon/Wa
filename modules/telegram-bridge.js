@@ -94,6 +94,20 @@ class TelegramBridge {
             }
         });
 
+        // New: Handle location messages from Telegram
+        this.telegramBot.on('location', async (msg) => {
+            if (msg.chat.type === 'supergroup' && msg.is_topic_message) {
+                await this.handleTelegramLocation(msg);
+            }
+        });
+
+        // New: Handle contact messages from Telegram
+        this.telegramBot.on('contact', async (msg) => {
+            if (msg.chat.type === 'supergroup' && msg.is_topic_message) {
+                await this.handleTelegramContact(msg);
+            }
+        });
+
         // Handle errors
         this.telegramBot.on('error', (error) => {
             logger.error('Telegram bot error:', error);
@@ -145,9 +159,9 @@ class TelegramBridge {
             await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
         } else if (whatsappMsg.message?.stickerMessage) {
             await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
-        } else if (whatsappMsg.message?.locationMessage) { // New: Handle location messages from WhatsApp
+        } else if (whatsappMsg.message?.locationMessage) { 
             await this.handleWhatsAppLocation(whatsappMsg, topicId);
-        } else if (whatsappMsg.message?.contactMessage) { // New: Handle contact messages from WhatsApp
+        } else if (whatsappMsg.message?.contactMessage) { 
             await this.handleWhatsAppContact(whatsappMsg, topicId);
         }
         else if (text) {
@@ -355,10 +369,10 @@ class TelegramBridge {
                     break;
                     
                 case 'sticker':
-                    // Check if it's an animated WebP and Telegram can send it directly
-                    // This is a simplification; robust animated sticker handling is complex.
+                    // Check if it's an animated WebP. Telegram's sendSticker doesn't directly support WhatsApp's animated WebP.
+                    // Converting static WebP to PNG for sendPhoto is a reliable fallback.
                     const isAnimatedWebP = buffer.slice(0, 12).toString('ascii').includes('ANIM');
-                    if (!isAnimatedWebP) { // Assume static WebP can be sent as photo for now
+                    if (!isAnimatedWebP) { // Assume static WebP can be converted to PNG for Telegram photo
                          const pngPath = filePath.replace('.webp', '.png');
                         await sharp(filePath).png().toFile(pngPath);
                         
@@ -368,7 +382,7 @@ class TelegramBridge {
                         });
                         await fs.unlink(pngPath).catch(() => {});
                     } else {
-                        // For animated WebP, send as a document or inform user
+                        // For animated WebP, send as a document and inform user
                         await this.telegramBot.sendDocument(chatId, filePath, {
                             message_thread_id: topicId,
                             caption: (caption ? caption + '\n' : '') + 'Animated sticker (animation not preserved)',
@@ -439,8 +453,8 @@ class TelegramBridge {
             // Send to WhatsApp
             await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
             
-            // Removed: Confirmation reaction
-            // await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '✅' }]);
+            // Re-enabled: Confirmation reaction
+            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '✅' }]);
 
         } catch (error) {
             logger.error('❌ Failed to handle Telegram message:', error);
@@ -523,8 +537,8 @@ class TelegramBridge {
                 case 'video':
                 case 'video_note':
                     if (mediaType === 'video_note') {
-                        // Convert video note to regular video for WhatsApp
-                        const convertedPath = path.join(this.tempDir, `converted_${Date.now()}.mp4`);
+                        // Convert video note to regular video for WhatsApp and send as PTV
+                        const convertedPath = path.join(this.tempDir, `converted_video_note_${Date.now()}.mp4`);
                         await this.convertVideoNote(filePath, convertedPath);
                         
                         await this.whatsappBot.sendMessage(whatsappJid, {
@@ -543,7 +557,7 @@ class TelegramBridge {
                     break;
                     
                 case 'voice':
-                    // Convert OGG to proper format for WhatsApp voice note
+                    // Convert OGG to proper format for WhatsApp voice note (mimicking mic recording)
                     const voicePath = path.join(this.tempDir, `voice_${Date.now()}.ogg`);
                     await this.convertToWhatsAppVoice(filePath, voicePath);
                     
@@ -556,6 +570,7 @@ class TelegramBridge {
                     break;
                     
                 case 'audio':
+                    // For general audio, send as a regular audio file
                     await this.whatsappBot.sendMessage(whatsappJid, {
                         audio: { url: filePath },
                         mimetype: mime.lookup(fileName) || 'audio/mp3',
@@ -597,8 +612,8 @@ class TelegramBridge {
             // Clean up temp file
             await fs.unlink(filePath).catch(() => {});
             
-            // Removed: Confirmation reaction
-            // await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '✅' }]);
+            // Re-enabled: Confirmation reaction
+            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '✅' }]);
 
         } catch (error) {
             logger.error(`❌ Failed to handle Telegram ${mediaType}:`, error);
@@ -610,6 +625,65 @@ class TelegramBridge {
             }
         }
     }
+
+    async handleTelegramLocation(msg) {
+        try {
+            const topicId = msg.message_thread_id;
+            const whatsappJid = this.findWhatsAppJidByTopic(topicId);
+
+            if (!whatsappJid) {
+                logger.warn('⚠️ Could not find WhatsApp chat for Telegram location');
+                return;
+            }
+
+            await this.whatsappBot.sendMessage(whatsappJid, { 
+                location: { 
+                    degreesLatitude: msg.location.latitude, 
+                    degreesLongitude: msg.location.longitude,
+                    name: msg.location.title, // Use title for name
+                    address: msg.location.address // Use address for address
+                } 
+            });
+
+            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '✅' }]);
+        } catch (error) {
+            logger.error('❌ Failed to handle Telegram location message:', error);
+            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }]);
+        }
+    }
+
+    async handleTelegramContact(msg) {
+        try {
+            const topicId = msg.message_thread_id;
+            const whatsappJid = this.findWhatsAppJidByTopic(topicId);
+
+            if (!whatsappJid) {
+                logger.warn('⚠️ Could not find WhatsApp chat for Telegram contact');
+                return;
+            }
+
+            // Construct a simple VCard string from Telegram contact data
+            const firstName = msg.contact.first_name || '';
+            const lastName = msg.contact.last_name || '';
+            const phoneNumber = msg.contact.phone_number || '';
+            const displayName = `${firstName} ${lastName}`.trim() || phoneNumber;
+
+            const vcard = `BEGIN:VCARD\nVERSION:3.0\nN:${lastName};${firstName};;;\nFN:${displayName}\nTEL;TYPE=CELL:${phoneNumber}\nEND:VCARD`;
+
+            await this.whatsappBot.sendMessage(whatsappJid, { 
+                contacts: { 
+                    displayName: displayName, 
+                    contacts: [{ vcard: vcard }]
+                } 
+            });
+
+            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '✅' }]);
+        } catch (error) {
+            logger.error('❌ Failed to handle Telegram contact message:', error);
+            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }]);
+        }
+    }
+
 
     async convertVideoNote(inputPath, outputPath) {
         return new Promise((resolve, reject) => {
@@ -644,7 +718,7 @@ class TelegramBridge {
                 .videoCodec('libx264')
                 .outputOptions([
                     '-pix_fmt yuv420p', // Pixel format for broader compatibility
-                    '-vf scale=512:-1', // Scale to a reasonable size if needed (e.g., 512px width)
+                    '-vf scale=512:-1', // Scale to a reasonable size (e.g., 512px width)
                     '-crf 28', // Constant Rate Factor for quality-controlled compression
                     '-preset veryfast' // Faster encoding
                 ])
