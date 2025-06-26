@@ -1,6 +1,6 @@
 const fs = require('fs-extra');
 const path = require('path');
-const logger = require('./logger'); // Fixed path
+const logger = require('..core//logger'); // Fixed path
 
 class ModuleLoader {
     constructor(bot) {
