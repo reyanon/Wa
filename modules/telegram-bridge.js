@@ -18,10 +18,13 @@ class TelegramBridge {
         this.whatsappBot = whatsappBot;
         this.telegramBot = null;
         this.chatMappings = new Map(); // WhatsApp JID -> Telegram Topic ID
+        this.reverseChatMappings = new Map(); // Telegram Topic ID -> WhatsApp JID
         this.userMappings = new Map(); // WhatsApp User -> Telegram User Data
         this.profilePicCache = new Map(); // User -> Profile Pic URL
         this.tempDir = path.join(__dirname, '../temp');
         this.isProcessing = false;
+        this.messageQueue = [];
+        this.processingMessages = new Set(); // Prevent duplicate processing
     }
 
     async initialize() {
@@ -51,7 +54,7 @@ class TelegramBridge {
             }
         });
 
-        // Handle media messages
+        // Handle media messages specifically
         this.telegramBot.on('photo', async (msg) => {
             if (msg.chat.type === 'supergroup' && msg.is_topic_message) {
                 await this.handleTelegramMedia(msg, 'photo');
@@ -125,29 +128,37 @@ class TelegramBridge {
     async syncMessage(whatsappMsg, text) {
         if (!this.telegramBot || !config.get('telegram.enabled')) return;
 
-        const sender = whatsappMsg.key.remoteJid;
-        const participant = whatsappMsg.key.participant || sender;
-        
-        // Create user mapping if not exists
-        await this.createUserMapping(participant, whatsappMsg);
-        
-        // Get or create topic for this chat
-        const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
-        
-        // Handle different message types
-        if (whatsappMsg.message?.imageMessage) {
-            await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
-        } else if (whatsappMsg.message?.videoMessage) {
-            await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
-        } else if (whatsappMsg.message?.audioMessage) {
-            await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
-        } else if (whatsappMsg.message?.documentMessage) {
-            await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
-        } else if (whatsappMsg.message?.stickerMessage) {
-            await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
-        } else if (text) {
-            // Send text message
-            await this.sendSimpleMessage(topicId, text);
+        const messageId = whatsappMsg.key.id;
+        if (this.processingMessages.has(messageId)) return;
+        this.processingMessages.add(messageId);
+
+        try {
+            const sender = whatsappMsg.key.remoteJid;
+            const participant = whatsappMsg.key.participant || sender;
+            
+            // Create user mapping if not exists
+            await this.createUserMapping(participant, whatsappMsg);
+            
+            // Get or create topic for this chat
+            const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
+            
+            // Handle different message types
+            if (whatsappMsg.message?.imageMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
+            } else if (whatsappMsg.message?.videoMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
+            } else if (whatsappMsg.message?.audioMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
+            } else if (whatsappMsg.message?.documentMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
+            } else if (whatsappMsg.message?.stickerMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
+            } else if (text) {
+                // Send simple text message
+                await this.sendSimpleMessage(topicId, text);
+            }
+        } finally {
+            this.processingMessages.delete(messageId);
         }
     }
 
@@ -155,20 +166,24 @@ class TelegramBridge {
         if (this.userMappings.has(participant)) return;
 
         // Extract user info from WhatsApp
-        let userName = 'Name not available';
+        let userName = null;
         let userPhone = participant.split('@')[0];
         
         try {
+            // Try to get pushname from message first
+            if (whatsappMsg.pushName) {
+                userName = whatsappMsg.pushName;
+            }
+            
             // Try to get contact name from WhatsApp
-            if (this.whatsappBot.sock) {
-                const contact = await this.whatsappBot.sock.onWhatsApp(participant);
-                if (contact && contact[0] && contact[0].notify) {
-                    userName = contact[0].notify;
-                }
-                
-                // Try to get pushname from message
-                if (whatsappMsg.pushName) {
-                    userName = whatsappMsg.pushName;
+            if (!userName && this.whatsappBot.sock) {
+                try {
+                    const contact = await this.whatsappBot.sock.onWhatsApp(participant);
+                    if (contact && contact[0] && contact[0].notify) {
+                        userName = contact[0].notify;
+                    }
+                } catch (error) {
+                    logger.debug('Could not fetch contact info:', error);
                 }
             }
         } catch (error) {
@@ -182,7 +197,7 @@ class TelegramBridge {
             messageCount: 0
         });
 
-        logger.debug(`👤 Created user mapping: ${userName} (${userPhone})`);
+        logger.debug(`👤 Created user mapping: ${userName || userPhone} (${userPhone})`);
     }
 
     async getOrCreateTopic(chatJid, whatsappMsg) {
@@ -199,7 +214,7 @@ class TelegramBridge {
         try {
             const isGroup = chatJid.endsWith('@g.us');
             const isStatus = chatJid === 'status@broadcast';
-            const isCall = chatJid.includes('call');
+            const isCall = chatJid.includes('call') || chatJid === 'call@broadcast';
             
             let topicName;
             let iconColor = 0x7ABA3C; // Default green
@@ -213,7 +228,7 @@ class TelegramBridge {
             } else if (isGroup) {
                 try {
                     const groupMeta = await this.whatsappBot.sock.groupMetadata(chatJid);
-                    topicName = `${groupMeta.subject}`;
+                    topicName = groupMeta.subject;
                 } catch (error) {
                     topicName = `Group Chat`;
                 }
@@ -224,7 +239,7 @@ class TelegramBridge {
                 const userInfo = this.userMappings.get(participant);
                 const phone = participant.split('@')[0];
                 
-                if (userInfo && userInfo.name !== 'Name not available') {
+                if (userInfo && userInfo.name) {
                     topicName = `${userInfo.name} ${phone}`;
                 } else {
                     topicName = phone;
@@ -237,6 +252,7 @@ class TelegramBridge {
             });
 
             this.chatMappings.set(chatJid, topic.message_thread_id);
+            this.reverseChatMappings.set(topic.message_thread_id, chatJid);
             logger.info(`🆕 Created Telegram topic: ${topicName} (ID: ${topic.message_thread_id})`);
             
             // Send profile picture if it's a private chat
@@ -255,7 +271,7 @@ class TelegramBridge {
         try {
             const profilePicUrl = await this.whatsappBot.sock.profilePictureUrl(jid, 'image');
             
-            if (profilePicUrl) {
+            if (profilePicUrl && profilePicUrl !== this.profilePicCache.get(jid)) {
                 const caption = isUpdate ? 'Profile picture updated' : null;
                 
                 await this.telegramBot.sendPhoto(config.get('telegram.chatId'), profilePicUrl, {
@@ -324,7 +340,7 @@ class TelegramBridge {
                     
                 case 'audio':
                     if (mediaMessage.ptt) {
-                        // Convert to voice message
+                        // Send as voice message
                         await this.telegramBot.sendVoice(chatId, filePath, {
                             message_thread_id: topicId
                         });
@@ -342,16 +358,9 @@ class TelegramBridge {
                     break;
                     
                 case 'sticker':
-                    // Convert WebP to PNG for Telegram
-                    const pngPath = filePath.replace('.webp', '.png');
-                    await sharp(filePath).png().toFile(pngPath);
-                    
-                    await this.telegramBot.sendPhoto(chatId, pngPath, {
+                    await this.telegramBot.sendSticker(chatId, filePath, {
                         message_thread_id: topicId
                     });
-                    
-                    // Clean up PNG file
-                    await fs.unlink(pngPath).catch(() => {});
                     break;
             }
 
@@ -365,11 +374,11 @@ class TelegramBridge {
 
     async handleTelegramMessage(msg) {
         // Only handle text messages here, media is handled separately
-        if (!msg.text) return;
+        if (!msg.text || msg.photo || msg.video || msg.audio || msg.voice || msg.document || msg.sticker || msg.video_note) return;
         
         try {
             const topicId = msg.message_thread_id;
-            const whatsappJid = this.findWhatsAppJidByTopic(topicId);
+            const whatsappJid = this.reverseChatMappings.get(topicId);
             
             if (!whatsappJid) {
                 logger.warn('⚠️ Could not find WhatsApp chat for Telegram message');
@@ -396,43 +405,50 @@ class TelegramBridge {
     async handleTelegramMedia(msg, mediaType) {
         try {
             const topicId = msg.message_thread_id;
-            const whatsappJid = this.findWhatsAppJidByTopic(topicId);
+            const whatsappJid = this.reverseChatMappings.get(topicId);
             
             if (!whatsappJid) {
                 logger.warn('⚠️ Could not find WhatsApp chat for Telegram media');
                 return;
             }
 
-            let fileId, fileName;
+            let fileId, fileName, mimeType;
             
             switch (mediaType) {
                 case 'photo':
                     fileId = msg.photo[msg.photo.length - 1].file_id; // Get highest resolution
                     fileName = `photo_${Date.now()}.jpg`;
+                    mimeType = 'image/jpeg';
                     break;
                 case 'video':
                     fileId = msg.video.file_id;
                     fileName = `video_${Date.now()}.mp4`;
+                    mimeType = msg.video.mime_type || 'video/mp4';
                     break;
                 case 'video_note':
                     fileId = msg.video_note.file_id;
                     fileName = `video_note_${Date.now()}.mp4`;
+                    mimeType = 'video/mp4';
                     break;
                 case 'voice':
                     fileId = msg.voice.file_id;
                     fileName = `voice_${Date.now()}.ogg`;
+                    mimeType = msg.voice.mime_type || 'audio/ogg';
                     break;
                 case 'audio':
                     fileId = msg.audio.file_id;
                     fileName = msg.audio.file_name || `audio_${Date.now()}.mp3`;
+                    mimeType = msg.audio.mime_type || 'audio/mpeg';
                     break;
                 case 'document':
                     fileId = msg.document.file_id;
                     fileName = msg.document.file_name || `document_${Date.now()}`;
+                    mimeType = msg.document.mime_type || 'application/octet-stream';
                     break;
                 case 'sticker':
                     fileId = msg.sticker.file_id;
                     fileName = `sticker_${Date.now()}.webp`;
+                    mimeType = 'image/webp';
                     break;
             }
 
@@ -448,38 +464,41 @@ class TelegramBridge {
             switch (mediaType) {
                 case 'photo':
                     await this.whatsappBot.sendMessage(whatsappJid, {
-                        image: { url: filePath }
+                        image: { url: filePath },
+                        mimetype: mimeType
                     });
                     break;
                     
                 case 'video':
+                    await this.whatsappBot.sendMessage(whatsappJid, {
+                        video: { url: filePath },
+                        mimetype: mimeType
+                    });
+                    break;
+                    
                 case 'video_note':
-                    if (mediaType === 'video_note') {
-                        // Convert video note to regular video for WhatsApp
-                        const convertedPath = path.join(this.tempDir, `converted_${fileName}`);
-                        await this.convertVideoNote(filePath, convertedPath);
-                        
-                        await this.whatsappBot.sendMessage(whatsappJid, {
-                            video: { url: convertedPath },
-                            ptv: true // Send as PTV (video note)
-                        });
-                        
-                        await fs.unlink(convertedPath).catch(() => {});
-                    } else {
-                        await this.whatsappBot.sendMessage(whatsappJid, {
-                            video: { url: filePath }
-                        });
-                    }
+                    // Convert video note to WhatsApp PTV format
+                    const ptvPath = path.join(this.tempDir, `ptv_${Date.now()}.mp4`);
+                    await this.convertToPTV(filePath, ptvPath);
+                    
+                    await this.whatsappBot.sendMessage(whatsappJid, {
+                        video: { url: ptvPath },
+                        ptv: true // Send as PTV (video note)
+                    });
+                    
+                    await fs.unlink(ptvPath).catch(() => {});
                     break;
                     
                 case 'voice':
-                    // Convert OGG to proper format for WhatsApp voice note
+                    // Convert to WhatsApp voice note format with proper encoding
                     const voicePath = path.join(this.tempDir, `voice_${Date.now()}.ogg`);
                     await this.convertToWhatsAppVoice(filePath, voicePath);
                     
                     await this.whatsappBot.sendMessage(whatsappJid, {
                         audio: { url: voicePath },
-                        ptt: true // Push to talk (voice note)
+                        mimetype: 'audio/ogg; codecs=opus',
+                        ptt: true, // Push to talk (voice note)
+                        seconds: msg.voice.duration || 0
                     });
                     
                     await fs.unlink(voicePath).catch(() => {});
@@ -487,7 +506,8 @@ class TelegramBridge {
                     
                 case 'audio':
                     await this.whatsappBot.sendMessage(whatsappJid, {
-                        audio: { url: filePath }
+                        audio: { url: filePath },
+                        mimetype: mimeType
                     });
                     break;
                     
@@ -495,7 +515,7 @@ class TelegramBridge {
                     await this.whatsappBot.sendMessage(whatsappJid, {
                         document: { url: filePath },
                         fileName: fileName,
-                        mimetype: mime.lookup(fileName) || 'application/octet-stream'
+                        mimetype: mimeType
                     });
                     break;
                     
@@ -523,12 +543,14 @@ class TelegramBridge {
         }
     }
 
-    async convertVideoNote(inputPath, outputPath) {
+    async convertToPTV(inputPath, outputPath) {
         return new Promise((resolve, reject) => {
             ffmpeg(inputPath)
                 .videoCodec('libx264')
                 .audioCodec('aac')
                 .format('mp4')
+                .size('320x320') // Square format for PTV
+                .aspect('1:1')
                 .on('end', resolve)
                 .on('error', reject)
                 .save(outputPath);
@@ -542,6 +564,11 @@ class TelegramBridge {
                 .format('ogg')
                 .audioChannels(1)
                 .audioFrequency(16000)
+                .audioBitrate('16k')
+                .outputOptions([
+                    '-avoid_negative_ts make_zero',
+                    '-fflags +genpts'
+                ])
                 .on('end', resolve)
                 .on('error', reject)
                 .save(outputPath);
@@ -568,15 +595,6 @@ class TelegramBridge {
             chunks.push(chunk);
         }
         return Buffer.concat(chunks);
-    }
-
-    findWhatsAppJidByTopic(topicId) {
-        for (const [jid, topic] of this.chatMappings.entries()) {
-            if (topic === topicId) {
-                return jid;
-            }
-        }
-        return null;
     }
 
     async syncWhatsAppConnection() {
