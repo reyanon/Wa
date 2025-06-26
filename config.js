@@ -28,17 +28,12 @@ class Config {
                 useTopics: true, // Set to false if your group doesn't use topics
                 logChannel: '-1002287300661', // Same as chatId for logging, or a different channel I
                 settings: {
-                    allowMedia: true,
-                    allowStickers: true,
-                    allowVoice: true,
-                    allowAudio: true,
-                    allowDocuments: true,
-                    allowVideos: true,
+                    enableCallNotifications: false,
+                    autoUpdateProfilePics: true.
                     syncContacts: true,
                     syncStatus: true,
                     syncCalls: true,
-                    autoUpdateProfilePics: true,
-                    bridgeEnabled: true
+
                 }
             },
             database: {
