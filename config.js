@@ -23,7 +23,7 @@ class Config {
             },
             telegram: {
                 enabled: true,
-                botToken: '7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI', // Your actual bot token
+                botToken: '7603869969:AAE0CVKqktc_5ITf8x8tyx00rQkuP-MXwe4', // Your actual bot token
                 chatId: '-1002287300661', // Your actual group chat ID
                 useTopics: true, // Set to false if your group doesn't use topics
                 logChannel: '-1002287300661', // Same as chatId for logging, or a different channel I
