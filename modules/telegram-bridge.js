@@ -35,21 +35,6 @@ class TelegramBridge {
             syncCalls: true,
             autoUpdateProfilePics: true
         };
-
-        this.commands = [
-            {
-                name: 'tgbridge',
-                description: 'Toggle Telegram bridge on/off',
-                category: 'admin',
-                execute: this.handleBridgeCommand.bind(this)
-            },
-            {
-                name: 'tgstatus',
-                description: 'Check Telegram bridge status',
-                category: 'admin',
-                execute: this.handleStatusCommand.bind(this)
-            }
-        ];
     }
 
     async init() {
@@ -70,21 +55,51 @@ class TelegramBridge {
             return;
         }
 
+        // Validate bot token before initializing
         try {
-            this.telegramBot = new TelegramBridgeBot(token, this);
-            await this.telegramBot.initialize();
-            await this.loadMappingsFromDatabase();
-            await this.createSystemTopics();
-            await this.cleanupInactiveTopics();
-            logger.info('✅ Telegram bridge initialized');
+            const response = await axios.get(`https://api.telegram.org/bot${token}/getMe`);
+            if (!response.data.ok) {
+                throw new Error('Invalid bot token');
+            }
+            logger.info(`✅ Valid Telegram bot token: ${response.data.result.username}`);
         } catch (error) {
-            logger.error('❌ Failed to initialize Telegram bridge:', error);
+            logger.error('❌ Invalid Telegram bot token or API unreachable:', error.message);
+            return;
+        }
+
+        let retries = 3;
+        while (retries > 0) {
+            try {
+                if (this.telegramBot) {
+                    await this.telegramBot.stop(); // Ensure previous instance is stopped
+                }
+                this.telegramBot = new TelegramBridgeBot(token, this);
+                await this.telegramBot.initialize();
+                await this.loadMappingsFromDatabase();
+                await this.createSystemTopics();
+                await this.cleanupInactiveTopics();
+                logger.info('✅ Telegram bridge initialized');
+                return;
+            } catch (error) {
+                logger.error(`❌ Failed to initialize Telegram bridge (attempt ${4 - retries}):`, error);
+                if (error.message.includes('409')) {
+                    logger.warn('⚠️ 409 Conflict detected, attempting to clear polling session');
+                    await axios.get(`https://api.telegram.org/bot${token}/getUpdates?offset=-1`);
+                }
+                retries--;
+                if (retries === 0) {
+                    logger.error('❌ Max retries reached, bridge initialization failed');
+                    throw error;
+                }
+                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+            }
         }
     }
 
     async loadMappingsFromDatabase() {
         try {
             const mappings = await this.database.getAllTopicMappings();
+            this.chatMappings.clear(); // Clear to avoid duplicates
             for (const mapping of mappings) {
                 this.chatMappings.set(mapping.whatsappJid, mapping.telegramTopicId);
             }
@@ -109,36 +124,44 @@ class TelegramBridge {
 
             // Create Status Updates topic if not exists
             if (!this.systemTopics.status) {
-                const statusTopic = await this.telegramBot.createForumTopic(chatId, '📱 Status Updates', {
-                    icon_color: 0x9367DA
-                });
-                this.systemTopics.status = statusTopic.message_thread_id;
-                await this.database.saveTopicMapping({
-                    whatsappJid: 'status@broadcast',
-                    telegramTopicId: statusTopic.message_thread_id,
-                    topicName: '📱 Status Updates',
-                    isGroup: false,
-                    isActive: true,
-                    messageCount: 0,
-                    lastActivity: new Date()
-                });
+                try {
+                    const statusTopic = await this.telegramBot.createForumTopic(chatId, '📱 Status Updates', {
+                        icon_color: 0x9367DA
+                    });
+                    this.systemTopics.status = statusTopic.message_thread_id;
+                    await this.database.saveTopicMapping({
+                        whatsappJid: 'status@broadcast',
+                        telegramTopicId: statusTopic.message_thread_id,
+                        topicName: '📱 Status Updates',
+                        isGroup: false,
+                        isActive: true,
+                        messageCount: 0,
+                        lastActivity: new Date()
+                    });
+                } catch (error) {
+                    logger.error('❌ Failed to create Status Updates topic:', error);
+                }
             }
 
             // Create Calls & Notifications topic if not exists
             if (!this.systemTopics.calls) {
-                const callsTopic = await this.telegramBot.createForumTopic(chatId, '📞 Calls & Notifications', {
-                    icon_color: 0xFF6B6B
-                });
-                this.systemTopics.calls = callsTopic.message_thread_id;
-                await this.database.saveTopicMapping({
-                    whatsappJid: 'calls@notifications',
-                    telegramTopicId: callsTopic.message_thread_id,
-                    topicName: '📞 Calls & Notifications',
-                    isGroup: false,
-                    isActive: true,
-                    messageCount: 0,
-                    lastActivity: new Date()
-                });
+                try {
+                    const callsTopic = await this.telegramBot.createForumTopic(chatId, '📞 Calls & Notifications', {
+                        icon_color: 0xFF6B6B
+                    });
+                    this.systemTopics.calls = callsTopic.message_thread_id;
+                    await this.database.saveTopicMapping({
+                        whatsappJid: 'calls@notifications',
+                        telegramTopicId: callsTopic.message_thread_id,
+                        topicName: '📞 Calls & Notifications',
+                        isGroup: false,
+                        isActive: true,
+                        messageCount: 0,
+                        lastActivity: new Date()
+                    });
+                } catch (error) {
+                    logger.error('❌ Failed to create Calls & Notifications topic:', error);
+                }
             }
 
             logger.info('✅ System topics created or reused');
@@ -208,12 +231,7 @@ class TelegramBridge {
                              `📊 Database: ${this.database.isConnected ? '✅ Connected' : '❌ Disconnected'}\n` +
                              `💬 Active Chats: ${this.chatMappings.size}\n` +
                              `👥 Cached Users: ${this.userMappings.size}\n` +
-                             `📱 System Topics: ${Object.values(this.systemTopics).filter(t => t).length}/2\n\n` +
-                             `*Settings:*\n` +
-                             `📷 Media: ${this.settings.allowMedia ? '✅' : '❌'}\n` +
-                             `🎭 Stickers: ${this.settings.allowStickers ? '✅' : '❌'}\n` +
-                             `🎵 Voice: ${this.settings.allowVoice ? '✅' : '❌'}\n` +
-                             `👥 Sync Contacts: ${this.settings.syncContacts ? '✅' : '❌'}`;
+                             `📱 System Topics: ${Object.values(this.systemTopics).filter(t => t).length}/2`;
 
         await context.bot.sendMessage(context.sender, { text: statusMessage });
     }
@@ -265,10 +283,7 @@ class TelegramBridge {
     async handleStatusUpdate(whatsappMsg, text) {
         if (!this.settings.syncStatus || !this.systemTopics.status) return;
 
-        const participant = whatsappMsg.key.participant;
-        const userInfo = this.userMappings.get(participant);
         const chatId = config.get('telegram.chatId');
-
         const statusMessage = text || '[Media status]';
         await this.telegramBot.sendMessage(chatId, statusMessage, {
             message_thread_id: this.systemTopics.status,
@@ -710,10 +725,12 @@ class TelegramBridge {
     async shutdown() {
         if (this.telegramBot) {
             await this.telegramBot.stop();
+            this.telegramBot = null;
             logger.info('📱 Telegram bridge stopped');
         }
-        if (this.database) {
+        if (this.database && this.database.isConnected) {
             await this.database.disconnect();
+            logger.info('📊 Database disconnected');
         }
     }
 }
