@@ -5,7 +5,7 @@ const axios = require('axios');
 const fs = require('fs-extra');
 const path = require('path');
 const sharp = require('sharp');
-const TelegramBridgeBot = require('./telegramBridgeBot');
+const TelegramBridgeBot = require('./lib/telegramBridgeBot');
 
 class TelegramBridge {
     constructor(whatsappBot) {
@@ -45,7 +45,7 @@ class TelegramBridge {
             await this.initialize();
         } catch (error) {
             logger.error('❌ Failed to initialize TelegramBridge:', error);
-            throw error; // Rethrow to catch in run
+            throw error;
         }
     }
 
@@ -65,8 +65,9 @@ class TelegramBridge {
                 throw new Error('Invalid bot token');
             }
             logger.info(`✅ Valid Telegram bot token: ${response.data.result.username}`);
-        } catch (error) {
-            logger.error('❌ Invalid Telegram bot token or API unreachable:', error.message);
+        } catch (error) авт
+
+System: logger.error('❌ Invalid Telegram bot token or API unreachable:', error.message);
             return;
         }
 
@@ -403,8 +404,7 @@ class TelegramBridge {
             this.chatMappings.set(chatJid, topic.message_thread_id);
             
             await this.database.saveTopicMapping({
-                whatsappJid: ch
-System: atJid,
+                whatsappJid: chatJid,
                 telegramTopicId: topic.message_thread_id,
                 topicName,
                 isGroup,
