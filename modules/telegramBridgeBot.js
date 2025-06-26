@@ -6,14 +6,36 @@ class TelegramBridgeBot {
     constructor(token, bridge) {
         this.bot = new TelegramBot(token, { polling: true });
         this.bridge = bridge;
+        this.isPolling = false;
     }
 
     async initialize() {
         try {
+            // Check if already polling
+            if (this.isPolling) {
+                logger.warn('⚠️ Bot is already polling, skipping initialization');
+                return;
+            }
+
+            // Clear any existing updates to prevent conflicts
+            try {
+                await this.bot.getUpdates({ offset: -1 });
+                logger.info('✅ Cleared Telegram update queue');
+            } catch (error) {
+                logger.error('❌ Failed to clear update queue:', error);
+            }
+
             await this.setupHandlers();
+            this.isPolling = true;
             logger.info('📱 Telegram message handlers set up');
         } catch (error) {
             logger.error('❌ Failed to set up Telegram handlers:', error);
+            if (error.message.includes('404')) {
+                logger.error('❌ 404 Not Found: Invalid bot token or Telegram API unreachable');
+            } else if (error.message.includes('409')) {
+                logger.error('❌ 409 Conflict: Multiple polling instances detected');
+            }
+            throw error;
         }
     }
 
@@ -38,9 +60,18 @@ class TelegramBridgeBot {
             }
         });
 
-        this.bot.on('callback_query', this.handleCallback.bind(this));
+        this.bot.on('polling_error', (error) => {
+            logger.error('❌ Telegram polling error:', error);
+            if (error.message.includes('404')) {
+                logger.error('❌ 404 Not Found: Check bot token or Telegram API connectivity');
+            } else if (error.message.includes('409')) {
+                logger.error('❌ 409 Conflict: Multiple bot instances detected, stopping polling');
+                this.stop();
+            }
+        });
+
         this.bot.on('error', (error) => {
-            logger.error('Telegram bot error:', error);
+            logger.error('❌ Telegram bot error:', error);
         });
     }
 
@@ -221,7 +252,7 @@ class TelegramBridgeBot {
         const statusMessage = `📊 *Bridge Status Report*\n\n` +
                              `🔗 Bridge: ${this.bridge.bridgeEnabled ? '✅ Active' : '❌ Inactive'}\n` +
                              `📱 WhatsApp: ${this.bridge.whatsappBot.sock ? '✅ Connected' : '❌ Disconnected'}\n` +
-                             `🤖 Telegram: ${this.bot ? '✅ Connected' : '❌ Disconnected'}\n` +
+                             `🤖 Telegram: ${this.isPolling ? '✅ Connected' : '❌ Disconnected'}\n` +
                              `📊 Database: ${this.bridge.database.isConnected ? '✅ Connected' : '❌ Disconnected'}\n` +
                              `💬 Active Chats: ${this.bridge.chatMappings.size}\n` +
                              `👥 Cached Users: ${this.bridge.userMappings.size}\n` +
@@ -339,43 +370,96 @@ class TelegramBridgeBot {
     }
 
     async createForumTopic(chatId, name, options) {
-        return await this.bot.createForumTopic(chatId, name, options);
+        try {
+            return await this.bot.createForumTopic(chatId, name, options);
+        } catch (error) {
+            logger.error('❌ Failed to create forum topic:', error);
+            throw error;
+        }
     }
 
     async closeForumTopic(chatId, topicId) {
-        return await this.bot.closeForumTopic(chatId, topicId);
+        try {
+            return await this.bot.closeForumTopic(chatId, topicId);
+        } catch (error) {
+            logger.error('❌ Failed to close forum topic:', error);
+            throw error;
+        }
     }
 
     async sendMessage(chatId, text, options = {}) {
-        return await this.bot.sendMessage(chatId, text, options);
+        try {
+            return await this.bot.sendMessage(chatId, text, options);
+        } catch (error) {
+            logger.error('❌ Failed to send message:', error);
+            throw error;
+        }
     }
 
     async sendPhoto(chatId, photo, options = {}) {
-        return await this.bot.sendPhoto(chatId, photo, options);
+        try {
+            return await this.bot.sendPhoto(chatId, photo, options);
+        } catch (error) {
+            logger.error('❌ Failed to send photo:', error);
+            throw error;
+        }
     }
 
     async sendVideo(chatId, video, options = {}) {
-        return await this.bot.sendVideo(chatId, video, options);
+        try {
+            return await this.bot.sendVideo(chatId, video, options);
+        } catch (error) {
+            logger.error('❌ Failed to send video:', error);
+            throw error;
+        }
     }
 
     async sendAudio(chatId, audio, options = {}) {
-        return await this.bot.sendAudio(chatId, audio, options);
+        try {
+            return await this.bot.sendAudio(chatId, audio, options);
+        } catch (error) {
+            logger.error('❌ Failed to send audio:', error);
+            throw error;
+        }
     }
 
     async sendDocument(chatId, document, options = {}) {
-        return await this.bot.sendDocument(chatId, document, options);
+        try {
+            return await this.bot.sendDocument(chatId, document, options);
+        } catch (error) {
+            logger.error('❌ Failed to send document:', error);
+            throw error;
+        }
     }
 
     async sendSticker(chatId, sticker, options = {}) {
-        return await this.bot.sendSticker(chatId, sticker, options);
+        try {
+            return await this.bot.sendSticker(chatId, sticker, options);
+        } catch (error) {
+            logger.error('❌ Failed to send sticker:', error);
+            throw error;
+        }
     }
 
     async getFile(fileId) {
-        return await this.bot.getFile(fileId);
+        try {
+            return await this.bot.getFile(fileId);
+        } catch (error) {
+            logger.error('❌ Failed to get file:', error);
+            throw error;
+        }
     }
 
     async stop() {
-        await this.bot.stopPolling();
+        try {
+            if (this.isPolling) {
+                await this.bot.stopPolling();
+                this.isPolling = false;
+                logger.info('✅ Telegram bot polling stopped');
+            }
+        } catch (error) {
+            logger.error('❌ Failed to stop polling:', error);
+        }
     }
 }
 
