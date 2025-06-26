@@ -32,8 +32,7 @@ class Config {
                     autoUpdateProfilePics: true.
                     syncContacts: true,
                     syncStatus: true,
-                    syncCalls: true,
-
+                    syncCalls: true
                 }
             },
             database: {
