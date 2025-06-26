@@ -5,7 +5,7 @@ const axios = require('axios');
 const fs = require('fs-extra');
 const path = require('path');
 const sharp = require('sharp');
-const TelegramBridgeBot = require('./lib/telegramBridgeBot');
+const TelegramBridgeBot = require('./telegramBridgeBot');
 
 class TelegramBridge {
     constructor(whatsappBot) {
