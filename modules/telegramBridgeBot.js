@@ -4,20 +4,24 @@ const logger = require('../core/logger');
 
 class TelegramBridgeBot {
     constructor(token, bridge) {
-        this.bot = new TelegramBot(token, { polling: true });
+        this.bot = new TelegramBot(token, {
+            polling: {
+                interval: 1000,
+                autoStart: false // Prevent automatic polling until initialized
+            }
+        });
         this.bridge = bridge;
         this.isPolling = false;
     }
 
     async initialize() {
         try {
-            // Check if already polling
             if (this.isPolling) {
                 logger.warn('⚠️ Bot is already polling, skipping initialization');
                 return;
             }
 
-            // Clear any existing updates to prevent conflicts
+            // Clear update queue
             try {
                 await this.bot.getUpdates({ offset: -1 });
                 logger.info('✅ Cleared Telegram update queue');
@@ -25,13 +29,24 @@ class TelegramBridgeBot {
                 logger.error('❌ Failed to clear update queue:', error);
             }
 
+            // Verify bot can access the supergroup
+            try {
+                const chatId = config.get('telegram.chatId');
+                await this.bot.getChat(chatId);
+                logger.info(`✅ Bot has access to supergroup ${chatId}`);
+            } catch (error) {
+                logger.error('❌ Bot cannot access supergroup:', error);
+                throw new Error('Bot not in supergroup or lacks permissions');
+            }
+
             await this.setupHandlers();
+            await this.bot.startPolling();
             this.isPolling = true;
-            logger.info('📱 Telegram message handlers set up');
+            logger.info('📱 Telegram message handlers set up and polling started');
         } catch (error) {
             logger.error('❌ Failed to set up Telegram handlers:', error);
             if (error.message.includes('404')) {
-                logger.error('❌ 404 Not Found: Invalid bot token or Telegram API unreachable');
+                logger.error('❌ 404 Not Found: Bot not in supergroup, lacks permissions, or Telegram API unreachable');
             } else if (error.message.includes('409')) {
                 logger.error('❌ 409 Conflict: Multiple polling instances detected');
             }
@@ -63,7 +78,7 @@ class TelegramBridgeBot {
         this.bot.on('polling_error', (error) => {
             logger.error('❌ Telegram polling error:', error);
             if (error.message.includes('404')) {
-                logger.error('❌ 404 Not Found: Check bot token or Telegram API connectivity');
+                logger.error('❌ 404 Not Found: Bot not in supergroup, lacks permissions, or Telegram API unreachable');
             } else if (error.message.includes('409')) {
                 logger.error('❌ 409 Conflict: Multiple bot instances detected, stopping polling');
                 this.stop();
