@@ -18,16 +18,7 @@ class MessageHandler {
 
         for (const msg of messages) {
             try {
-                if (!msg.message) {
-                    // Log message stub types even if no 'message' field
-                    if (msg.messageStubType) {
-                        logger.debug(`Received message stub type: ${msg.messageStubType} from ${msg.key.remoteJid}`);
-                    }
-                    // Continue processing stub types or return if no relevant info
-                    // If no message and no stub type, just skip
-                    if (!msg.messageStubType) continue;
-                }
-
+                if (!msg.message && !msg.messageStubType) continue;
                 await this.processMessage(msg);
             } catch (error) {
                 logger.error('❌ Error processing message:', error);
@@ -39,168 +30,188 @@ class MessageHandler {
         const text = this.extractText(msg);
         const sender = msg.key.remoteJid;
 
-        logger.debug(`Processing message from ${sender}, type: ${msg.messageStubType || 'regular message'}`);
-
         // Handle status updates
         if (sender === 'status@broadcast') {
-            logger.info(`📸 Detected Status from ${msg.key.participant || 'unknown'}`);
             await this.handleStatusMessage(msg, text);
-            return; // Important: Don't process status as a regular message
+            return;
         }
 
-        // Handle profile picture updates (StubType 5 can also be other events, refine if needed)
-        // Note: For actual profile picture updates, msg.messageStubType is usually 5
-        // and messageStubParameters might contain the JID of the updated profile.
+        // Handle profile picture updates
         if (msg.messageStubType === 5 && config.get('telegram.settings.autoUpdateProfilePics')) {
-            logger.info(`🖼️ Detected Profile Picture Update Stub Type 5 from ${sender}`);
             await this.handleProfilePictureUpdate(msg);
-            // This might not always return if stub type 5 can be combined with other message types.
-            // For now, let it continue if it's not exclusively a profile pic update.
         }
 
-        // Handle call messages
-        if (msg.messageStubType && this.isCallMessage(msg) && config.get('telegram.settings.syncCalls')) {
-            logger.info(`📞 Detected Call Message Stub Type ${msg.messageStubType} from ${sender}`);
+        // Handle call messages - Fixed call detection
+        if (msg.messageStubType && this.isCallMessage(msg.messageStubType)) {
             await this.handleCallMessage(msg);
-            return; // Important: Don't process call as a regular message
+            return; // Don't process call messages further
         }
 
-        // Handle command messages
-        if (text && text.startsWith(config.get('bot.prefix'))) {
-            if (config.get('features.rateLimiting') && !rateLimiter.canExecute(sender, 'command')) {
-                await this.bot.sendMessage(sender, { text: 'You are sending commands too quickly. Please wait a moment.' });
-                return;
-            }
-            const args = text.slice(config.get('bot.prefix').length).trim().split(/ +/);
-            const command = args.shift().toLowerCase();
-
-            const handler = this.commandHandlers.get(command);
-            if (handler) {
-                if (this.checkPermissions(msg, command)) {
-                    logger.info(`⚡ Executing command: ${command} from ${sender}`);
-                    await handler(this.bot, msg, args);
-                } else {
-                    logger.warn(`🚫 Permission denied for command: ${command} from ${sender}`);
-                    await this.bot.sendMessage(sender, { text: 'You do not have permission to use this command.' });
-                }
-            } else {
-                // If a command is not found, it might be intended for Telegram or external.
-                // We don't send "command not found" to avoid spam for mistyped commands.
-                logger.debug(`Command not found: ${command}`);
-            }
-            return; // Command handled, prevent further processing as regular text
+        // Handle command
+        const prefix = config.get('bot.prefix');
+        if (text && text.startsWith(prefix)) {
+            await this.handleCommand(msg, text);
+        } else {
+            await this.handleNonCommandMessage(msg, text);
         }
 
-        // Handle regular text messages (only if not a command, status, or call)
-        if (text && !msg.key.fromMe) { // Don't bridge messages sent by the bot itself
-            if (config.get('features.telegramBridge') && this.bot.telegramBridge) {
-                logger.debug(`Bridging text message from ${sender}`);
-                await this.bot.telegramBridge.syncMessage(msg, text);
-            }
+        // Sync messages to Telegram (including media and regular messages)
+        if (this.bot.telegramBridge && msg.message) {
+            await this.bot.telegramBridge.syncMessage(msg, text);
         }
     }
 
+    extractText(msg) {
+        return msg.message?.conversation ||
+               msg.message?.extendedTextMessage?.text ||
+               msg.message?.imageMessage?.caption ||
+               msg.message?.videoMessage?.caption ||
+               msg.message?.documentMessage?.caption ||
+               msg.message?.audioMessage?.caption ||
+               '';
+    }
+
+    async handleCommand(msg, text) {
+        const sender = msg.key.remoteJid;
+        const participant = msg.key.participant || sender;
+        const prefix = config.get('bot.prefix');
+        
+        const args = text.slice(prefix.length).trim().split(/\s+/);
+        const command = args.shift().toLowerCase();
+
+        if (!this.checkPermissions(msg, command)) {
+            return this.bot.sendMessage(sender, {
+                text: '❌ You don\'t have permission to use this command.'
+            });
+        }
+
+        const userId = participant.split('@')[0];
+        if (config.get('features.rateLimiting')) {
+            const allowed = await rateLimiter.checkCommandLimit(userId);
+            if (!allowed) {
+                const time = await rateLimiter.getRemainingTime(userId);
+                return this.bot.sendMessage(sender, {
+                    text: `⏱️ Rate limit exceeded. Try again in ${Math.ceil(time / 1000)} seconds.`
+                });
+            }
+        }
+
+        const handler = this.commandHandlers.get(command);
+        if (handler) {
+            try {
+                await handler.execute(msg, args, {
+                    bot: this.bot,
+                    sender,
+                    participant,
+                    isGroup: sender.endsWith('@g.us')
+                });
+
+                logger.info(`✅ Command executed: ${command} by ${participant}`);
+
+                if (this.bot.telegramBridge) {
+                    await this.bot.telegramBridge.logToTelegram('📝 Command Executed', 
+                        `Command: ${command}\nUser: ${participant}\nChat: ${sender}`);
+                }
+            } catch (error) {
+                logger.error(`❌ Command failed: ${command}`, error);
+                await this.bot.sendMessage(sender, {
+                    text: `❌ Command failed: ${error.message}`
+                });
+
+                if (this.bot.telegramBridge) {
+                    await this.bot.telegramBridge.logToTelegram('❌ Command Error',
+                        `Command: ${command}\nError: ${error.message}\nUser: ${participant}`);
+                }
+            }
+        } else {
+            await this.bot.sendMessage(sender, {
+                text: `❓ Unknown command: ${command}\nType *${prefix}menu* for available commands.`
+            });
+        }
+    }
+
+    async handleNonCommandMessage(msg, text) {
+        logger.debug('Non-command message received:', text ? text.substring(0, 50) : 'Media message');
+    }
+
     async handleStatusMessage(msg, text) {
-        if (!this.bot.telegramBridge || !config.get('telegram.settings.syncStatus')) return;
-
-        // Ensure status messages are automatically viewed
         if (config.get('features.autoViewStatus')) {
-            await this.bot.sock.readMessages([msg.key]);
-            logger.debug(`Auto-viewed status from ${msg.key.participant || msg.key.remoteJid}`);
+            try {
+                await this.bot.sock.readMessages([msg.key]);
+                await this.bot.sock.sendMessage(msg.key.remoteJid, {
+                    react: { key: msg.key, text: '❤️' }
+                });
+                logger.debug(`❤️ Liked status from ${msg.key.participant}`);
+            } catch (error) {
+                logger.error('❌ Error handling status:', error);
+            }
         }
 
-        const statusPosterJid = msg.key.participant || msg.key.remoteJid;
-        const senderName = msg.pushName || statusPosterJid.split('@')[0];
-        const statusType = msg.message?.imageMessage ? 'Image Status' :
-                           msg.message?.videoMessage ? 'Video Status' :
-                           'Text Status';
-
-        let messageToSend = `*New ${statusType} from ${senderName}*`;
-        if (text) {
-            messageToSend += `:\n\n${text}`;
+        // Sync status updates to Telegram
+        if (this.bot.telegramBridge && config.get('telegram.settings.syncStatus')) {
+            try {
+                await this.bot.telegramBridge.syncMessage(msg, text || 'Status update');
+            } catch (error) {
+                logger.error('❌ Error syncing status update to Telegram:', error);
+            }
         }
-
-        logger.debug(`Syncing status message to Telegram: ${statusType} from ${senderName}`);
-
-        // syncMessage will determine the media type and handle it appropriately.
-        // It's crucial that `msg` contains the correct message structure for media types.
-        await this.bot.telegramBridge.syncMessage(msg, messageToSend);
     }
 
     async handleCallMessage(msg) {
         if (!this.bot.telegramBridge || !config.get('telegram.settings.syncCalls')) return;
 
         const callType = this.getCallType(msg.messageStubType);
-        const callerJid = msg.key.participant || msg.key.remoteJid;
-        const callerName = msg.pushName || callerJid.split('@')[0];
+        const participant = msg.key.participant || msg.key.remoteJid;
+        const participantName = participant.split('@')[0];
 
-        // messageStubParameters can contain more details like video/group call
-        const isVideoCall = msg.messageStubParameters && msg.messageStubParameters.includes('true'); // Simplified check
-        const isGroupCall = msg.messageStubParameters && msg.messageStubParameters.includes('Group'); // Placeholder, actual value depends on Baileys
-
-        let callDetails = `*Call Log:* ${callType} call from ${callerName}`;
-        if (isVideoCall) callDetails += ' (Video)';
-        if (isGroupCall) callDetails += ' (Group)';
-
-        // Attempt to extract duration from messageStubParameters if available
-        // This is highly dependent on Baileys message structure for call stubs
-        // Example: some Baileys versions might have duration as a parameter
-        const durationParam = msg.messageStubParameters ? msg.messageStubParameters.find(p => p.includes('duration')) : null;
-        if (durationParam) {
-            const durationMatch = durationParam.match(/duration=(\d+)/);
-            if (durationMatch && durationMatch[1]) {
-                const durationSeconds = parseInt(durationMatch[1], 10);
-                const minutes = Math.floor(durationSeconds / 60);
-                const seconds = durationSeconds % 60;
-                callDetails += ` (Duration: ${minutes}m ${seconds}s)`;
+        // Create a call message for Telegram sync
+        const callMessage = {
+            ...msg,
+            key: { ...msg.key, remoteJid: 'call@broadcast' },
+            message: {
+                conversation: `${callType} call from ${participantName}`
             }
-        }
+        };
 
-        logger.debug(`Syncing call message to Telegram: ${callDetails}`);
-        // Pass the actual JID that made the call for topic mapping
-        await this.bot.telegramBridge.syncMessage({key: {remoteJid: callerJid}}, callDetails);
+        try {
+            await this.bot.telegramBridge.syncMessage(callMessage, `${callType} call from ${participantName}`);
+            logger.debug(`📞 Synced ${callType} call from ${participantName} to Telegram`);
+        } catch (error) {
+            logger.error('❌ Error handling call message:', error);
+        }
     }
 
-    isCallMessage(msg) {
-        // MessageStubTypes for various call events (missed, incoming, outgoing, etc.)
-        const callTypes = [1, 2, 3, 4, 5, 28, 29, 30, 31, 32]; // Expanded typical call stub types
-        return callTypes.includes(msg.messageStubType);
+    isCallMessage(stubType) {
+        // WhatsApp call message stub types
+        const callTypes = [1, 2, 3, 4, 5, 6, 7, 8];
+        return callTypes.includes(stubType);
     }
 
     getCallType(stubType) {
         switch (stubType) {
-            case 1: return 'Missed';
-            case 2: return 'Outgoing';
-            case 3: return 'Incoming';
-            case 4: return 'Video Call';
-            case 5: return 'Ended Call'; // Often paired with a call log
-            case 28: return 'Missed Group';
-            case 29: return 'Incoming Group';
-            case 30: return 'Outgoing Group';
-            case 31: return 'Missed Video Group';
-            case 32: return 'Outgoing Video Group';
-            default: return 'Unknown Call';
+            case 1: return 'Missed voice';
+            case 2: return 'Outgoing voice';
+            case 3: return 'Incoming voice';
+            case 4: return 'Missed video';
+            case 5: return 'Outgoing video';
+            case 6: return 'Incoming video';
+            case 7: return 'Rejected';
+            case 8: return 'Group call';
+            default: return 'Unknown';
         }
     }
 
     async handleProfilePictureUpdate(msg) {
-        if (!this.bot.telegramBridge || !config.get('telegram.settings.autoUpdateProfilePics')) return;
+        if (!this.bot.telegramBridge) return;
 
         try {
-            // messageStubParameters for stubType 5 often contains the JID that updated their profile.
-            // Example: msg.messageStubParameters = ['923298784489@s.whatsapp.net']
-            const participant = msg.messageStubParameters && msg.messageStubParameters.length > 0
-                ? msg.messageStubParameters[0]
-                : msg.key.remoteJid; // Fallback to remoteJid if param is not present
-
-            logger.info(`Attempting to send profile picture for ${participant}`);
-
-            // Ensure the JID exists in chatMappings or is a direct chat.
-            // We need to pass the topic ID if it exists, otherwise the JID
+            const participant = msg.key.participant || msg.key.remoteJid;
             const topicId = this.bot.telegramBridge.chatMappings.get(participant);
 
-            // sendProfilePicture can handle either topicId or JID to find/create topic
-            await this.bot.telegramBridge.sendProfilePicture(topicId, participant, true);
+            if (topicId) {
+                await this.bot.telegramBridge.sendProfilePicture(topicId, participant, true);
+                logger.debug(`📸 Updated profile picture for ${participant.split('@')[0]}`);
+            }
         } catch (error) {
             logger.error('❌ Error handling profile picture update:', error);
         }
@@ -221,17 +232,6 @@ class MessageHandler {
         if (blockedUsers.includes(userId)) return false;
 
         return true;
-    }
-
-    extractText(msg) {
-        return msg.message?.conversation ||
-               msg.message?.extendedTextMessage?.text ||
-               msg.message?.imageMessage?.caption ||
-               msg.message?.videoMessage?.caption ||
-               msg.message?.locationMessage?.name || // For location messages
-               msg.message?.contactMessage?.displayName || // For contact messages
-               msg.message?.templateButtonReplyMessage?.selectedDisplayText ||
-               '';
     }
 }
 
