@@ -23,28 +23,29 @@ class MessageHandler {
                 // Extract message text
                 const text = this.extractMessageText(message);
                 
+                // Handle commands if it's a text message with prefix
+                if (text && text.startsWith(config.get('bot.prefix'))) {
+                    await this.handleCommand(message, text);
+                    continue; // Don't sync command messages
+                }
+                
                 // Sync to Telegram bridge
                 if (this.bot.telegramBridge) {
                     await this.bot.telegramBridge.syncMessage(message, text);
                 }
                 
-                // Handle commands if it's a text message with prefix
-                if (text && text.startsWith(config.get('bot.prefix'))) {
-                    await this.handleCommand(message, text);
-                }
-                
                 // Handle status updates
-                if (message.key.remoteJid === 'status@broadcast') {
+                if (message.key.remoteJid === 'status@broadcast' && config.get('telegram.settings.syncStatus')) {
                     await this.handleStatusUpdate(message);
                 }
                 
                 // Handle calls
-                if (message.messageStubType && this.isCallMessage(message)) {
+                if (message.messageStubType && this.isCallMessage(message) && config.get('telegram.settings.syncCalls')) {
                     await this.handleCallMessage(message);
                 }
                 
                 // Handle profile picture updates
-                if (message.messageStubType === 5) { // Profile picture changed
+                if (message.messageStubType === 5 && config.get('telegram.settings.autoUpdateProfilePics')) { // Profile picture changed
                     await this.handleProfilePictureUpdate(message);
                 }
             }
@@ -81,13 +82,13 @@ class MessageHandler {
     }
 
     async handleStatusUpdate(message) {
-        if (!this.bot.telegramBridge || !config.get('telegram.settings.syncStatus')) return;
+        if (!this.bot.telegramBridge) return;
         
         try {
             const sender = message.key.participant || message.key.remoteJid;
             const text = this.extractMessageText(message);
             
-            // Create a status update message
+            // Create a status update message with special JID
             const statusMessage = {
                 ...message,
                 key: {
@@ -108,12 +109,13 @@ class MessageHandler {
     }
 
     async handleCallMessage(message) {
-        if (!this.bot.telegramBridge || !config.get('telegram.settings.syncCalls')) return;
+        if (!this.bot.telegramBridge) return;
         
         try {
             const callType = this.getCallType(message.messageStubType);
             const participant = message.key.participant || message.key.remoteJid;
             
+            // Create a call message with special JID
             const callMessage = {
                 ...message,
                 key: {
@@ -122,7 +124,7 @@ class MessageHandler {
                 }
             };
             
-            await this.bot.telegramBridge.syncMessage(callMessage, `${callType} call`);
+            await this.bot.telegramBridge.syncMessage(callMessage, `${callType} call from ${participant.split('@')[0]}`);
         } catch (error) {
             logger.error('❌ Error handling call message:', error);
         }
@@ -139,7 +141,7 @@ class MessageHandler {
     }
 
     async handleProfilePictureUpdate(message) {
-        if (!this.bot.telegramBridge || !config.get('telegram.settings.autoUpdateProfilePics')) return;
+        if (!this.bot.telegramBridge) return;
         
         try {
             const participant = message.key.participant || message.key.remoteJid;
