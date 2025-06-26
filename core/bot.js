@@ -7,6 +7,7 @@ const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
 const TelegramBridge = require('../modules/telegram-bridge');
+const ModuleLoader = require('../modules/module-loader'); 
 
 class AdvancedWhatsAppBot {
     constructor() {
@@ -15,14 +16,14 @@ class AdvancedWhatsAppBot {
         this.messageHandler = new MessageHandler(this);
         this.telegramBridge = null;
         this.isShuttingDown = false;
-        this.loadedModules = new Map();
+        this.moduleLoader = new ModuleLoader(this);
     }
 
     async initialize() {
         logger.info('🔧 Initializing Advanced WhatsApp Bot...');
         
         // Load modules
-        await this.loadModules();
+        await this.moduleLoader.loadModules(); 
         
         // Initialize Telegram bridge if enabled
         if (config.get('telegram.enabled') && config.get('telegram.botToken')) {
@@ -37,75 +38,75 @@ class AdvancedWhatsAppBot {
     }
 
     async loadModules() {
-        logger.info('📦 Loading modules...');
-        
-        const modulesPath = path.join(__dirname, '../modules');
-        await fs.ensureDir(modulesPath);
+    logger.info('📦 Loading modules...');
 
-        try {
-            const files = await fs.readdir(modulesPath);
-            
-            for (const file of files) {
-                if (file.endsWith('.js')) {
-                    await this.loadModule(path.join(modulesPath, file));
-                }
+    const modulesPath = path.join(__dirname, '../modules');
+    await fs.ensureDir(modulesPath);
+
+    try {
+        const files = await fs.readdir(modulesPath);
+
+        for (const file of files) {
+            if (file.endsWith('.js')) {
+                await this.loadModule(path.join(modulesPath, file));
             }
-        } catch (error) {
-            logger.error('Error loading modules:', error);
         }
-        
-        logger.info(`✅ Loaded ${this.loadedModules.size} modules`);
+    } catch (error) {
+        logger.error('Error loading modules:', error);
     }
 
-    async loadModule(modulePath) {
-        try {
-            const moduleId = path.basename(modulePath, '.js');
-            
-            // Clear require cache for hot reloading
-            delete require.cache[require.resolve(modulePath)];
-            
-            const ModuleClass = require(modulePath);
-            const moduleInstance = new ModuleClass(this);
-            
-            // Validate module structure
-            if (!this.validateModule(moduleInstance)) {
-                logger.warn(`⚠️ Invalid module structure: ${moduleId}`);
-                return;
-            }
+    logger.info(`✅ Loaded ${this.loadedModules.size} modules`);
+}
 
-            // Initialize module
-            if (moduleInstance.init) {
-                await moduleInstance.init();
-            }
+async loadModule(modulePath) {
+    try {
+        const moduleId = path.basename(modulePath, '.js');
 
-            // Register commands
-            if (moduleInstance.commands) {
-                for (const command of moduleInstance.commands) {
-                    this.messageHandler.registerCommandHandler(command.name, command);
-                }
-            }
+        // Clear require cache for hot reloading
+        delete require.cache[require.resolve(modulePath)];
 
-            this.loadedModules.set(moduleId, {
-                instance: moduleInstance,
-                path: modulePath,
-                loaded: new Date()
-            });
+        const ModuleClass = require(modulePath);
+        const moduleInstance = new ModuleClass(this);
 
-            logger.info(`✅ Loaded module: ${moduleId}`);
-        } catch (error) {
-            logger.error(`❌ Failed to load module ${modulePath}:`, error);
+        // Validate module structure
+        if (!this.validateModule(moduleInstance)) {
+            logger.warn(`⚠️ Invalid module structure: ${moduleId}`);
+            return;
         }
-    }
 
-    validateModule(module) {
-        return (
-            module &&
-            typeof module === 'object' &&
-            module.name &&
-            module.version &&
-            (module.commands || module.handlers)
-        );
+        // Initialize module
+        if (moduleInstance.init) {
+            await moduleInstance.init();
+        }
+
+        // Register commands
+        if (moduleInstance.commands) {
+            for (const command of moduleInstance.commands) {
+                this.messageHandler.registerCommandHandler(command.name, command);
+            }
+        }
+
+        this.loadedModules.set(moduleId, {
+            instance: moduleInstance,
+            path: modulePath,
+            loaded: new Date()
+        });
+
+        logger.info(`✅ Loaded module: ${moduleId}`);
+    } catch (error) {
+        logger.error(`❌ Failed to load module ${modulePath}:`, error);
     }
+}
+
+validateModule(module) {
+    return (
+        module &&
+        typeof module === 'object' &&
+        module.name &&
+        module.version &&
+        (module.commands || module.handlers)
+    );
+}
 
     async startWhatsApp() {
         const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
