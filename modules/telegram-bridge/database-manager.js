@@ -75,7 +75,7 @@ class DatabaseManager {
     async initialize() {
         try {
             // Connect to MongoDB
-            const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-telegram-bridge';
+            const mongoUri = 'mongodb+srv://itxelijah07:ivp8FYGsbVfjQOkj@cluster0.wh25x.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
             
             await mongoose.connect(mongoUri, {
                 useNewUrlParser: true,
