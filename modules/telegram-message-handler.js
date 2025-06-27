@@ -93,7 +93,7 @@ class TelegramMessageHandler {
         }
     }
 
-    async confirmFailure(msg) {
+        async confirmFailure(msg) {
         try {
             await this.telegramBot.sendMessage(msg.chat.id, '❌ Failed to deliver', {
                 reply_to_message_id: msg.message_id
@@ -101,10 +101,7 @@ class TelegramMessageHandler {
         } catch (err) {
             logger.debug('❌ Failed to send failure reply:', err.message);
         }
-    }
-}
-
-module.exports = TelegramMessageHandler;
+    }  // ✅ <--- this must exist
 
     async handleMedia(msg, mediaType) {
         const topicId = msg.message_thread_id;
