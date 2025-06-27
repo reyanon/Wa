@@ -345,44 +345,82 @@ class TelegramBridge {
 
         const callerId = callEvent.from;
         const callKey = `${callerId}_${callEvent.id}`;
-
-        // Prevent spam - only send one notification per call
         if (this.activeCallNotifications.has(callKey)) return;
-        
         this.activeCallNotifications.set(callKey, true);
-        
-        // Clear after 30 seconds
         setTimeout(() => {
             this.activeCallNotifications.delete(callKey);
         }, 30000);
 
         try {
             const userInfo = this.userMappings.get(callerId);
-            const callerName = userInfo?.name || callerId.split('@')[0];
-            const callType = callEvent.isVideo ? '📹 Video' : '📞 Voice';
-            const status = callEvent.status === 'offer' ? 'Incoming' : 
-                          callEvent.status === 'accept' ? 'Accepted' : 
-                          callEvent.status === 'reject' ? 'Rejected' : 'Ended';
+            const callerName = userInfo?.name;
+            const nameOrNumber = callerName || callerId.split('@')[0];
+            const callTime = new Date().toLocaleTimeString();
 
-            // Get or create call topic
             const topicId = await this.getOrCreateTopic('call@broadcast', {
                 key: { remoteJid: 'call@broadcast', participant: callerId }
             });
 
-            const callMessage = `${callType} Call ${status}\n\n` +
-                               `👤 **Caller:** ${callerName}\n` +
-                               `📱 **Number:** +${callerId.split('@')[0]}\n` +
-                               `⏰ **Time:** ${new Date().toLocaleString()}\n` +
-                               `📊 **Status:** ${status}`;
+            const summary = `🔴 ${nameOrNumber}
+${callTime} — Incoming Call`;
 
-            await this.telegramBot.sendMessage(config.get('telegram.chatId'), callMessage, {
+            await this.telegramBot.sendMessage(config.get('telegram.chatId'), summary, {
                 message_thread_id: topicId,
                 parse_mode: 'Markdown'
             });
 
-            logger.debug(`📞 Sent call notification: ${callType} ${status} from ${callerName}`);
         } catch (error) {
             logger.error('❌ Error handling call notification:', error);
+        }
+    }
+
+    async getOrCreateTopic(chatJid, whatsappMsg) {
+        if (this.chatMappings.has(chatJid)) return this.chatMappings.get(chatJid);
+
+        const chatId = config.get('telegram.chatId');
+        if (!chatId || chatId.includes('2345678901')) {
+            logger.error('❌ Telegram chat ID not configured properly');
+            return null;
+        }
+
+        try {
+            const isGroup = chatJid.endsWith('@g.us');
+            const isStatus = chatJid === 'status@broadcast';
+            const isCall = chatJid === 'call@broadcast';
+
+            let topicName;
+            let iconColor = 0x7ABA3C;
+
+            if (isStatus) {
+                topicName = `📊 Status Updates`;
+                iconColor = 0xFF6B35;
+            } else if (isCall) {
+                topicName = `📞 Call Logs`;
+                iconColor = 0xFF4757;
+            } else if (isGroup) {
+                try {
+                    const groupMeta = await this.whatsappBot.sock.groupMetadata(chatJid);
+                    topicName = `${groupMeta.subject}`;
+                } catch {
+                    topicName = `Group Chat`;
+                }
+                iconColor = 0x6FB9F0;
+            } else {
+                const participant = whatsappMsg.key.participant || chatJid;
+                const userInfo = this.userMappings.get(participant);
+                const phone = participant.split('@')[0];
+                topicName = userInfo?.name || phone;
+            }
+
+            const topic = await this.telegramBot.createForumTopic(chatId, topicName, {
+                icon_color: iconColor
+            });
+
+            this.chatMappings.set(chatJid, topic.message_thread_id);
+            return topic.message_thread_id;
+        } catch (error) {
+            logger.error('❌ Failed to create Telegram topic:', error);
+            return null;
         }
     }
 
@@ -517,45 +555,28 @@ class TelegramBridge {
     }
 
     async handleTelegramMessage(msg) {
-        // Skip if message has media (handled by specific media handlers)
-        if (msg.photo || msg.video || msg.video_note || msg.voice || msg.audio || msg.document || msg.sticker || msg.location || msg.contact) {
+        if (msg.photo || msg.video || msg.voice || msg.document || msg.audio || msg.sticker || msg.location || msg.contact) {
             return;
         }
 
         if (!msg.text) return;
-        
+
         try {
             const topicId = msg.message_thread_id;
             const whatsappJid = this.findWhatsAppJidByTopic(topicId);
-            
             if (!whatsappJid) {
                 logger.warn('⚠️ Could not find WhatsApp chat for Telegram message');
                 return;
             }
 
-            // Handle status reply
-            if (whatsappJid === 'status@broadcast' && msg.reply_to_message) {
-                await this.handleStatusReply(msg);
-                return;
-            }
+            const sentMsg = await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
 
-            // Send to WhatsApp
-            await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
-            
-            // React with thumbs up when message is delivered to WhatsApp
-            try {
-                await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👍' }]);
-            } catch (reactionError) {
-                logger.debug('Could not set delivery reaction:', reactionError);
-            }
+            await this.whatsappBot.sock.sendMessage(whatsappJid, {
+                react: { key: sentMsg.key, text: '✅' }
+            });
 
         } catch (error) {
             logger.error('❌ Failed to handle Telegram message:', error);
-            try {
-                await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }]);
-            } catch (reactionError) {
-                logger.debug('Could not set error reaction:', reactionError);
-            }
         }
     }
 
