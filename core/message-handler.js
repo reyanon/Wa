@@ -19,24 +19,6 @@ class MessageHandler {
         for (const msg of messages) {
             try {
                 if (!msg.message && !msg.messageStubType) continue;
-
-                // Handle WhatsApp reactions → Telegram
-                if (msg.message?.reactionMessage && this.bot.telegramBridge) {
-                    const reaction = msg.message.reactionMessage;
-                    const jid = msg.key.remoteJid;
-                    await this.bot.telegramBridge.forwardWhatsAppReaction(jid, {
-                        emoji: reaction.text,
-                        sender: msg.participant || msg.key.participant || jid
-                    });
-                }
-
-                // Handle WhatsApp "about" updates → Telegram
-                if (msg.messageStubType === 38 && this.bot.telegramBridge) {
-                    const jid = msg.key.remoteJid;
-                    const aboutText = msg.messageStubParameters?.[0] || 'Updated About';
-                    await this.bot.telegramBridge.notifyAboutTextChange(jid, aboutText);
-                }
-
                 await this.processMessage(msg);
             } catch (error) {
                 logger.error('❌ Error processing message:', error);
@@ -65,11 +47,6 @@ class MessageHandler {
             await this.handleCommand(msg, text);
         } else {
             await this.handleNonCommandMessage(msg, text);
-        }
-
-        // Sync messages to Telegram (including media and regular messages)
-        if (this.bot.telegramBridge && msg.message) {
-            await this.bot.telegramBridge.syncMessage(msg, text);
         }
     }
 
@@ -119,21 +96,11 @@ class MessageHandler {
                 });
 
                 logger.info(`✅ Command executed: ${command} by ${participant}`);
-
-                if (this.bot.telegramBridge) {
-                    await this.bot.telegramBridge.logToTelegram('📝 Command Executed', 
-                        `Command: ${command}\nUser: ${participant}\nChat: ${sender}`);
-                }
             } catch (error) {
                 logger.error(`❌ Command failed: ${command}`, error);
                 await this.bot.sendMessage(sender, {
                     text: `❌ Command failed: ${error.message}`
                 });
-
-                if (this.bot.telegramBridge) {
-                    await this.bot.telegramBridge.logToTelegram('❌ Command Error',
-                        `Command: ${command}\nError: ${error.message}\nUser: ${participant}`);
-                }
             }
         } else {
             await this.bot.sendMessage(sender, {
@@ -143,12 +110,7 @@ class MessageHandler {
     }
 
     async handleNonCommandMessage(msg, text) {
-        if (!text && msg.message) {
-            const type = Object.keys(msg.message)[0];
-            logger.debug(`📦 Received media or non-text message of type: ${type}`);
-        } else {
-            logger.debug('Non-command message received:', text ? text.substring(0, 50) : 'Media message');
-        }
+        logger.debug('📩 Non-command message received:', text ? text.substring(0, 50) : '[media]');
     }
 
     async handleStatusMessage(msg, text) {
@@ -163,46 +125,11 @@ class MessageHandler {
                 logger.error('❌ Error handling status:', error);
             }
         }
-
-        // Sync status updates to Telegram
-        if (this.bot.telegramBridge && config.get('telegram.settings.syncStatus')) {
-            try {
-                const participant = msg.key.participant;
-                const userInfo = this.bot.telegramBridge.userMappings.get(participant);
-                const userName = userInfo?.name || participant?.split('@')[0] || 'Unknown';
-                const userPhone = participant?.split('@')[0] || 'Unknown';
-
-                const enhancedStatusMsg = {
-                    ...msg,
-                    key: { ...msg.key, remoteJid: 'status@broadcast' },
-                    statusUser: {
-                        name: userName,
-                        phone: userPhone,
-                        participant: participant
-                    }
-                };
-
-                await this.bot.telegramBridge.syncMessage(enhancedStatusMsg, text || 'Status update');
-            } catch (error) {
-                logger.error('❌ Error syncing status update to Telegram:', error);
-            }
-        }
     }
 
     async handleProfilePictureUpdate(msg) {
-        if (!this.bot.telegramBridge) return;
-
-        try {
-            const participant = msg.key.participant || msg.key.remoteJid;
-            const topicId = this.bot.telegramBridge.chatMappings.get(participant);
-
-            if (topicId) {
-                await this.bot.telegramBridge.sendProfilePicture(topicId, participant, true);
-                logger.debug(`📸 Updated profile picture for ${participant.split('@')[0]}`);
-            }
-        } catch (error) {
-            logger.error('❌ Error handling profile picture update:', error);
-        }
+        logger.debug('🖼️ Profile picture update detected');
+        // You may implement further logic if needed (e.g., save locally, notify, etc.)
     }
 
     checkPermissions(msg, command) {
