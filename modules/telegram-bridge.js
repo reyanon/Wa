@@ -555,30 +555,48 @@ ${callTime} — Incoming Call`;
     }
 
     async handleTelegramMessage(msg) {
-        if (msg.photo || msg.video || msg.voice || msg.document || msg.audio || msg.sticker || msg.location || msg.contact) {
+        // Skip if message has media (handled by specific media handlers)
+        if (msg.photo || msg.video || msg.video_note || msg.voice || msg.audio || msg.document || msg.sticker || msg.location || msg.contact) {
             return;
         }
 
         if (!msg.text) return;
-
+        
         try {
             const topicId = msg.message_thread_id;
             const whatsappJid = this.findWhatsAppJidByTopic(topicId);
+            
             if (!whatsappJid) {
                 logger.warn('⚠️ Could not find WhatsApp chat for Telegram message');
                 return;
             }
 
-            const sentMsg = await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
+            // Handle status reply
+            if (whatsappJid === 'status@broadcast' && msg.reply_to_message) {
+                await this.handleStatusReply(msg);
+                return;
+            }
 
-            await this.whatsappBot.sock.sendMessage(whatsappJid, {
-                react: { key: sentMsg.key, text: '✅' }
-            });
+            // Send to WhatsApp
+            await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
+            
+            // React with thumbs up when message is delivered to WhatsApp
+            try {
+                await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👍' }]);
+            } catch (reactionError) {
+                logger.debug('Could not set delivery reaction:', reactionError);
+            }
 
         } catch (error) {
             logger.error('❌ Failed to handle Telegram message:', error);
+            try {
+                await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }]);
+            } catch (reactionError) {
+                logger.debug('Could not set error reaction:', reactionError);
+            }
         }
     }
+
 
     async handleStatusReply(msg) {
         try {
