@@ -186,9 +186,12 @@ class AdvancedWhatsAppBot {
     }
 // Startup, Messaging, Shutdown, Export
 
-    async sendStartupMessage() {
+        async sendStartupMessage() {
         const owner = config.get('bot.owner');
-        if (!owner) return;
+        if (!owner) {
+            logger.warn('⚠️ Bot owner not configured. Skipping startup message.');
+            return;
+        }
 
         const startupMessage =
             `🚀 *${config.get('bot.name')} v${config.get('bot.version')}* is now online!\n\n` +
@@ -202,14 +205,24 @@ class AdvancedWhatsAppBot {
             `• 📊 Status Sync: ${config.get('telegram.settings.syncStatus') ? '✅' : '❌'}\n\n` +
             `Type *${config.get('bot.prefix')}menu* to see all commands!`;
 
+        const sendToOwner = async (label = '') => {
+            try {
+                await this.sock.sendMessage(owner, { text: startupMessage });
+                logger.info(`✅ Startup message sent to owner${label}`);
+            } catch (err) {
+                logger.error(`❌ Failed to send startup message${label}:`, err.message);
+            }
+        };
+
         try {
-            await this.sock.sendMessage(owner, { text: startupMessage });
+            await sendToOwner();
 
             if (this.telegramBridge) {
                 await this.telegramBridge.logToTelegram('🚀 WhatsApp Bot Started', startupMessage);
             }
-        } catch (error) {
-            logger.error('❌ Failed to send startup message:', error);
+        } catch {
+            logger.warn('🔁 Retry startup message in 5s...');
+            setTimeout(() => sendToOwner(' (retry)'), 5000);
         }
     }
 
@@ -226,7 +239,7 @@ class AdvancedWhatsAppBot {
             await this.telegramBridge.shutdown();
         }
 
-        // Do NOT logout here – we keep session intact
+        // Do NOT logout here – session should persist for reuse
         logger.info('✅ Bot shutdown complete');
     }
 }
