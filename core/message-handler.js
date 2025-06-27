@@ -10,7 +10,7 @@ class MessageHandler {
 
     registerCommandHandler(command, handler) {
         this.commandHandlers.set(command.toLowerCase(), handler);
-        logger.debug(`Registered command handler: ${command}`);
+        logger.debug(`📝 Registered command handler: ${command}`);
     }
 
     async handleMessages({ messages, type }) {
@@ -18,7 +18,6 @@ class MessageHandler {
 
         for (const msg of messages) {
             try {
-                if (!msg.message && !msg.messageStubType) continue;
                 await this.processMessage(msg);
             } catch (error) {
                 logger.error('Error processing message:', error);
@@ -27,162 +26,112 @@ class MessageHandler {
     }
 
     async processMessage(msg) {
+        // Handle status messages
+        if (msg.key.remoteJid === 'status@broadcast') {
+            return this.handleStatusMessage(msg);
+        }
+
+        // Handle regular messages
         const text = this.extractText(msg);
-        const sender = msg.key.remoteJid;
+        if (!text) return;
 
-        if (sender === 'status@broadcast') {
-            await this.handleStatusMessage(msg, text);
-            return;
-        }
-
-        if (msg.messageStubType === 5 && config.get('telegram.settings.autoUpdateProfilePics')) {
-            await this.handleProfilePictureUpdate(msg);
-        }
-
+        // Check if it's a command
         const prefix = config.get('bot.prefix');
-        if (text && text.startsWith(prefix)) {
+        if (text.startsWith(prefix)) {
             await this.handleCommand(msg, text);
         } else {
+            // Handle non-command messages (for custom modules)
             await this.handleNonCommandMessage(msg, text);
         }
 
-        // Fallback sync for messages without text (pure media)
-        if (this.bot.telegramBridge && msg.message && !text) {
-            await this.bot.telegramBridge.syncMessage(msg, 'Media message without text');
-        }
-    }
-
-    extractText(msg) {
-        return msg.message?.conversation ||
-               msg.message?.extendedTextMessage?.text ||
-               msg.message?.imageMessage?.caption ||
-               msg.message?.videoMessage?.caption ||
-               msg.message?.documentMessage?.caption ||
-               msg.message?.audioMessage?.caption ||
-               '';
-    }
-
-    async handleCommand(msg, text) {
-        const sender = msg.key.remoteJid;
-        const participant = msg.key.participant || sender;
-        const prefix = config.get('bot.prefix');
-
-        const args = text.slice(prefix.length).trim().split(/\s+/);
-        const command = args.shift().toLowerCase();
-
-        if (!this.checkPermissions(msg, command)) {
-            return this.bot.sendMessage(sender, {
-                text: 'You don\'t have permission to use this command.'
-            });
-        }
-
-        const userId = participant.split('@')[0];
-        if (config.get('features.rateLimiting')) {
-            const allowed = await rateLimiter.checkCommandLimit(userId);
-            if (!allowed) {
-                const time = await rateLimiter.getRemainingTime(userId);
-                return this.bot.sendMessage(sender, {
-                    text: `Rate limit exceeded. Try again in ${Math.ceil(time / 1000)} seconds.`
-                });
-            }
-        }
-
-        const handler = this.commandHandlers.get(command);
-        if (handler) {
-            try {
-                await handler.execute(msg, args, {
-                    bot: this.bot,
-                    sender,
-                    participant,
-                    isGroup: sender.endsWith('@g.us')
-                });
-
-                logger.info(`Command executed: ${command} by ${participant}`);
-
-                if (this.bot.telegramBridge) {
-                    await this.bot.telegramBridge.logToTelegram('Command Executed', 
-                        `Command: ${command}\nUser: ${participant}\nChat: ${sender}`);
-                }
-            } catch (error) {
-                logger.error(`Command failed: ${command}`, error);
-                await this.bot.sendMessage(sender, {
-                    text: `Command failed: ${error.message}`
-                });
-
-                if (this.bot.telegramBridge) {
-                    await this.bot.telegramBridge.logToTelegram('Command Error',
-                        `Command: ${command}\nError: ${error.message}\nUser: ${participant}`);
-                }
-            }
-        } else {
-            await this.bot.sendMessage(sender, {
-                text: `Unknown command: ${command}\nType *${prefix}menu* for available commands.`
-            });
-        }
-    }
-
-    async handleNonCommandMessage(msg, text) {
-        logger.debug('Non-command message received:', text ? text.substring(0, 50) : 'Media message');
-
-        // NO reaction here — bot reactions are now only done after it sends WhatsApp messages
-        // This avoids reacting to user's messages incorrectly
-
+        // Sync to Telegram if bridge is active
         if (this.bot.telegramBridge) {
             await this.bot.telegramBridge.syncMessage(msg, text);
         }
     }
 
-    async handleStatusMessage(msg, text) {
+    async handleStatusMessage(msg) {
         if (config.get('features.autoViewStatus')) {
             try {
                 await this.bot.sock.readMessages([msg.key]);
                 await this.bot.sock.sendMessage(msg.key.remoteJid, {
                     react: { key: msg.key, text: '❤️' }
                 });
-                logger.debug(`Liked status from ${msg.key.participant}`);
+                logger.debug(`❤️ Liked status from ${msg.key.participant}`);
             } catch (error) {
                 logger.error('Error handling status:', error);
             }
         }
+    }
 
-        if (this.bot.telegramBridge && config.get('telegram.settings.syncStatus')) {
-            try {
-                const participant = msg.key.participant;
-                const userInfo = this.bot.telegramBridge.userMappings.get(participant); 
-                const userName = userInfo?.name || participant?.split('@')[0] || 'Unknown';
-                const userPhone = participant?.split('@')[0] || 'Unknown';
+    async handleCommand(msg, text) {
+        const sender = msg.key.remoteJid;
+        const participant = msg.key.participant || sender;
+        const prefix = config.get('bot.prefix');
+        
+        // Extract command and arguments
+        const args = text.slice(prefix.length).trim().split(/\s+/);
+        const command = args[0].toLowerCase();
+        const params = args.slice(1);
 
-                const enhancedStatusMsg = {
-                    ...msg,
-                    key: { ...msg.key, remoteJid: 'status@broadcast' },
-                    statusUser: {
-                        name: userName,
-                        phone: userPhone,
-                        participant: participant
-                    }
-                };
+        // Check permissions
+        if (!this.checkPermissions(msg, command)) {
+            return this.bot.sendMessage(sender, {
+                text: '❌ You don\'t have permission to use this command.'
+            });
+        }
 
-                await this.bot.telegramBridge.syncMessage(enhancedStatusMsg, text || 'Status update');
-            } catch (error) {
-                logger.error('Error syncing status update to Telegram:', error);
+        // Check rate limits
+        const userId = participant.split('@')[0];
+        if (config.get('features.rateLimiting')) {
+            const canExecute = await rateLimiter.checkCommandLimit(userId);
+            if (!canExecute) {
+                const remainingTime = await rateLimiter.getRemainingTime(userId);
+                return this.bot.sendMessage(sender, {
+                    text: `⏱️ Rate limit exceeded. Try again in ${Math.ceil(remainingTime / 1000)} seconds.`
+                });
             }
+        }
+
+        // Execute command
+        const handler = this.commandHandlers.get(command);
+        if (handler) {
+            try {
+                await handler.execute(msg, params, {
+                    bot: this.bot,
+                    sender,
+                    participant,
+                    isGroup: sender.endsWith('@g.us')
+                });
+                logger.info(`✅ Command executed: ${command} by ${participant}`);
+                
+                // Log command to Telegram
+                if (this.bot.telegramBridge) {
+                    await this.bot.telegramBridge.logToTelegram('📝 Command Executed', 
+                        `Command: ${command}\nUser: ${participant}\nChat: ${sender}`);
+                }
+            } catch (error) {
+                logger.error(`❌ Command failed: ${command}`, error);
+                await this.bot.sendMessage(sender, {
+                    text: `❌ Command failed: ${error.message}`
+                });
+                
+                // Log error to Telegram
+                if (this.bot.telegramBridge) {
+                    await this.bot.telegramBridge.logToTelegram('❌ Command Error', 
+                        `Command: ${command}\nError: ${error.message}\nUser: ${participant}`);
+                }
+            }
+        } else {
+            await this.bot.sendMessage(sender, {
+                text: `❓ Unknown command: ${command}\nType *${prefix}menu* for available commands.`
+            });
         }
     }
 
-    async handleProfilePictureUpdate(msg) {
-        if (!this.bot.telegramBridge) return;
-
-        try {
-            const participant = msg.key.participant || msg.key.remoteJid;
-            const topicId = this.bot.telegramBridge.chatMappings.get(participant);
-
-            if (topicId) {
-                await this.bot.telegramBridge.sendProfilePicture(topicId, participant, true);
-                logger.debug(`Updated profile picture for ${participant.split('@')[0]}`);
-            }
-        } catch (error) {
-            logger.error('Error handling profile picture update:', error);
-        }
+    async handleNonCommandMessage(msg, text) {
+        // Allow custom modules to process non-command messages
+        logger.debug('Non-command message received:', text.substring(0, 50));
     }
 
     checkPermissions(msg, command) {
@@ -190,16 +139,31 @@ class MessageHandler {
         const participant = msg.key.participant || sender;
         const owner = config.get('bot.owner');
         const mode = config.get('features.mode');
-
+        
+        // Check if user is owner
         const isOwner = participant === owner || msg.key.fromMe;
+        
+        // Check mode restrictions
+        if (mode === 'private' && !isOwner) {
+            return false;
+        }
 
-        if (mode === 'private' && !isOwner) return false;
-
+        // Check blocked users
         const blockedUsers = config.get('security.blockedUsers') || [];
         const userId = participant.split('@')[0];
-        if (blockedUsers.includes(userId)) return false;
+        if (blockedUsers.includes(userId)) {
+            return false;
+        }
 
         return true;
+    }
+
+    extractText(msg) {
+        return msg.message?.conversation || 
+               msg.message?.extendedTextMessage?.text || 
+               msg.message?.imageMessage?.caption ||
+               msg.message?.videoMessage?.caption || 
+               '';
     }
 }
 
