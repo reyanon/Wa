@@ -27,9 +27,12 @@ async function main() {
         });
 
         process.on('unhandledRejection', (reason, promise) => {
-            logger.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
-            process.exit(1);
-        });
+    console.error('💥 Unhandled Rejection:');
+    console.error('Reason:', reason);
+    console.error(reason?.stack || reason);
+    process.exit(1);
+});
+
 
     } catch (error) {
         logger.error('💥 Failed to start bot:', error);
