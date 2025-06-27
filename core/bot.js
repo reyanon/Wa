@@ -1,3 +1,4 @@
+// Imports, Constructor, Initialization
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs-extra');
@@ -11,7 +12,7 @@ const TelegramBridge = require('../modules/telegram-bridge');
 class AdvancedWhatsAppBot {
     constructor() {
         this.sock = null;
-        this.authPath = './auth_info';
+        this.authPath = path.join(__dirname, '../session');  // safer than ./auth_info
         this.messageHandler = new MessageHandler(this);
         this.telegramBridge = null;
         this.isShuttingDown = false;
@@ -20,31 +21,29 @@ class AdvancedWhatsAppBot {
 
     async initialize() {
         logger.info('🔧 Initializing Advanced WhatsApp Bot...');
-        
-        // Load modules
+
+        // Load custom modules
         await this.loadModules();
-        
-        // Initialize Telegram bridge if enabled
+
+        // Setup Telegram bridge
         if (config.get('telegram.enabled') && config.get('telegram.botToken')) {
             this.telegramBridge = new TelegramBridge(this);
             await this.telegramBridge.initialize();
         }
 
-        // Start WhatsApp connection
+        // Connect to WhatsApp
         await this.startWhatsApp();
-        
+
         logger.info('✅ Bot initialized successfully!');
     }
 
     async loadModules() {
         logger.info('📦 Loading modules...');
-        
         const modulesPath = path.join(__dirname, '../modules');
         await fs.ensureDir(modulesPath);
 
         try {
             const files = await fs.readdir(modulesPath);
-            
             for (const file of files) {
                 if (file.endsWith('.js') && file !== 'telegram-bridge.js') {
                     await this.loadModule(path.join(modulesPath, file));
@@ -53,32 +52,23 @@ class AdvancedWhatsAppBot {
         } catch (error) {
             logger.error('Error loading modules:', error);
         }
-        
+
         logger.info(`✅ Loaded ${this.loadedModules.size} modules`);
     }
 
     async loadModule(modulePath) {
         try {
             const moduleId = path.basename(modulePath, '.js');
-            
-            // Clear require cache for hot reloading
             delete require.cache[require.resolve(modulePath)];
-            
             const ModuleClass = require(modulePath);
             const moduleInstance = new ModuleClass(this);
-            
-            // Validate module structure
+
             if (!this.validateModule(moduleInstance)) {
                 logger.warn(`⚠️ Invalid module structure: ${moduleId}`);
                 return;
             }
 
-            // Initialize module
-            if (moduleInstance.init) {
-                await moduleInstance.init();
-            }
-
-            // Register commands
+            if (moduleInstance.init) await moduleInstance.init();
             if (moduleInstance.commands) {
                 for (const command of moduleInstance.commands) {
                     this.messageHandler.registerCommandHandler(command.name, command);
@@ -98,14 +88,10 @@ class AdvancedWhatsAppBot {
     }
 
     validateModule(module) {
-        return (
-            module &&
-            typeof module === 'object' &&
-            module.name &&
-            module.version &&
-            (module.commands || module.handlers)
-        );
+        return module && typeof module === 'object' && module.name && module.version && (module.commands || module.handlers);
     }
+
+// WhatsApp Connection, Event Setup, Telegram Calls
 
     async startWhatsApp() {
         const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
@@ -124,35 +110,54 @@ class AdvancedWhatsAppBot {
 
     setupEventHandlers(saveCreds) {
         this.sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
-            
-            if (qr) {
-                logger.info('📱 Scan QR code with WhatsApp:');
-                qrcode.generate(qr, { small: true });
-            }
-            
-            if (connection === 'close') {
-                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                
-                if (shouldReconnect && !this.isShuttingDown) {
-                    logger.warn('🔄 Connection closed, reconnecting...');
-                    setTimeout(() => this.startWhatsApp(), 5000);
-                } else {
-                    logger.error('❌ Connection closed permanently. Please delete auth_info and restart.');
+            try {
+                const { connection, lastDisconnect, qr } = update;
+
+                if (qr) {
+                    logger.info('📱 Scan QR code with WhatsApp:');
+                    qrcode.generate(qr, { small: true });
                 }
-            } else if (connection === 'open') {
-                await this.onConnectionOpen();
+
+                if (connection === 'close') {
+                    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                    if (shouldReconnect && !this.isShuttingDown) {
+                        logger.warn('🔄 Connection closed, reconnecting...');
+                        setTimeout(() => this.startWhatsApp(), 5000);
+                    } else {
+                        logger.error('❌ Connection closed permanently. Please delete session and restart.');
+                    }
+                } else if (connection === 'open') {
+                    await this.onConnectionOpen();
+                }
+            } catch (err) {
+                logger.error('💥 Error in connection.update:', err);
             }
         });
 
-        this.sock.ev.on('creds.update', saveCreds);
-        this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
-        
-        // Listen for call events - only if real-time detection is enabled
+        this.sock.ev.on('creds.update', async () => {
+            try {
+                await saveCreds();
+            } catch (err) {
+                logger.error('💥 Error saving credentials:', err);
+            }
+        });
+
+        this.sock.ev.on('messages.upsert', async (data) => {
+            try {
+                await this.messageHandler.handleMessages(data);
+            } catch (err) {
+                logger.error('💥 Error in messages.upsert handler:', err);
+            }
+        });
+
         if (config.get('telegram.settings.enableCallNotifications', true)) {
             this.sock.ev.on('call', async (callEvents) => {
                 for (const call of callEvents) {
-                    await this.handleCallEvent(call);
+                    try {
+                        await this.handleCallEvent(call);
+                    } catch (err) {
+                        logger.error('❌ Error handling call:', err);
+                    }
                 }
             });
         }
@@ -162,7 +167,6 @@ class AdvancedWhatsAppBot {
         if (!this.telegramBridge) return;
 
         try {
-            // Pass call event to telegram bridge for handling
             await this.telegramBridge.handleCallNotification(call);
             logger.debug(`📞 Handled call event: ${call.status} from ${call.from.split('@')[0]}`);
         } catch (error) {
@@ -172,68 +176,57 @@ class AdvancedWhatsAppBot {
 
     async onConnectionOpen() {
         logger.info('✅ Connected to WhatsApp!');
-        
-        // Set owner if not set
+
         if (!config.get('bot.owner') && this.sock.user) {
             config.set('bot.owner', this.sock.user.id);
             logger.info(`👑 Owner set to: ${this.sock.user.id}`);
         }
 
-        // Send startup message to owner
         await this.sendStartupMessage();
-        
-        // Initialize Telegram bridge connection
-        if (this.telegramBridge) {
-            await this.telegramBridge.syncWhatsAppConnection();
-        }
     }
+// Startup, Messaging, Shutdown, Export
 
     async sendStartupMessage() {
         const owner = config.get('bot.owner');
         if (!owner) return;
 
-        const startupMessage = `🚀 *${config.get('bot.name')} v${config.get('bot.version')}* is now online!\n\n` +
-                              `🔥 *Advanced Features Active:*\n` +
-                              `• 📱 Modular Architecture\n` +
-                              `• 🤖 Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
-                              `• 🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
-                              `• 🔧 Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n` +
-                              `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n` +
-                              `• 📞 Call Notifications: ${config.get('telegram.settings.enableCallNotifications', true) ? '✅' : '❌'}\n` +
-                              `• 📊 Status Sync: ${config.get('telegram.settings.syncStatus') ? '✅' : '❌'}\n\n` +
-                              `Type *${config.get('bot.prefix')}menu* to see all commands!`;
+        const startupMessage =
+            `🚀 *${config.get('bot.name')} v${config.get('bot.version')}* is now online!\n\n` +
+            `🔥 *Advanced Features Active:*\n` +
+            `• 📱 Modular Architecture\n` +
+            `• 🤖 Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
+            `• 🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
+            `• 🔧 Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n` +
+            `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n` +
+            `• 📞 Call Notifications: ${config.get('telegram.settings.enableCallNotifications', true) ? '✅' : '❌'}\n` +
+            `• 📊 Status Sync: ${config.get('telegram.settings.syncStatus') ? '✅' : '❌'}\n\n` +
+            `Type *${config.get('bot.prefix')}menu* to see all commands!`;
 
         try {
             await this.sock.sendMessage(owner, { text: startupMessage });
-            
-            // Also log to Telegram
+
             if (this.telegramBridge) {
                 await this.telegramBridge.logToTelegram('🚀 WhatsApp Bot Started', startupMessage);
             }
         } catch (error) {
-            logger.error('Failed to send startup message:', error);
+            logger.error('❌ Failed to send startup message:', error);
         }
     }
 
     async sendMessage(jid, content) {
-        if (!this.sock) {
-            throw new Error('WhatsApp socket not initialized');
-        }
+        if (!this.sock) throw new Error('WhatsApp socket not initialized');
         return await this.sock.sendMessage(jid, content);
     }
 
     async shutdown() {
         logger.info('🛑 Shutting down bot...');
         this.isShuttingDown = true;
-        
+
         if (this.telegramBridge) {
             await this.telegramBridge.shutdown();
         }
-        
-        if (this.sock) {
-            await this.sock.logout();
-        }
-        
+
+        // Do NOT logout here – we keep session intact
         logger.info('✅ Bot shutdown complete');
     }
 }
