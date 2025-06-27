@@ -19,6 +19,24 @@ class MessageHandler {
         for (const msg of messages) {
             try {
                 if (!msg.message && !msg.messageStubType) continue;
+
+                // Handle WhatsApp reactions → Telegram
+                if (msg.message?.reactionMessage && this.bot.telegramBridge) {
+                    const reaction = msg.message.reactionMessage;
+                    const jid = msg.key.remoteJid;
+                    await this.bot.telegramBridge.forwardWhatsAppReaction(jid, {
+                        emoji: reaction.text,
+                        sender: msg.participant || msg.key.participant || jid
+                    });
+                }
+
+                // Handle WhatsApp "about" updates → Telegram
+                if (msg.messageStubType === 38 && this.bot.telegramBridge) {
+                    const jid = msg.key.remoteJid;
+                    const aboutText = msg.messageStubParameters?.[0] || 'Updated About';
+                    await this.bot.telegramBridge.notifyAboutTextChange(jid, aboutText);
+                }
+
                 await this.processMessage(msg);
             } catch (error) {
                 logger.error('❌ Error processing message:', error);
@@ -125,7 +143,12 @@ class MessageHandler {
     }
 
     async handleNonCommandMessage(msg, text) {
-        logger.debug('Non-command message received:', text ? text.substring(0, 50) : 'Media message');
+        if (!text && msg.message) {
+            const type = Object.keys(msg.message)[0];
+            logger.debug(`📦 Received media or non-text message of type: ${type}`);
+        } else {
+            logger.debug('Non-command message received:', text ? text.substring(0, 50) : 'Media message');
+        }
     }
 
     async handleStatusMessage(msg, text) {
@@ -144,13 +167,11 @@ class MessageHandler {
         // Sync status updates to Telegram
         if (this.bot.telegramBridge && config.get('telegram.settings.syncStatus')) {
             try {
-                // Create enhanced status message with user info
                 const participant = msg.key.participant;
                 const userInfo = this.bot.telegramBridge.userMappings.get(participant);
                 const userName = userInfo?.name || participant?.split('@')[0] || 'Unknown';
                 const userPhone = participant?.split('@')[0] || 'Unknown';
-                
-                // Create status message with user details
+
                 const enhancedStatusMsg = {
                     ...msg,
                     key: { ...msg.key, remoteJid: 'status@broadcast' },
