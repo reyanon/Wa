@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys'); 
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs-extra');
 const path = require('path');
@@ -19,7 +19,7 @@ class AdvancedWhatsAppBot {
     }
 
     async initialize() {
-        logger.info('Initializing Advanced WhatsApp Bot...');
+        logger.info('🔧 Initializing Advanced WhatsApp Bot...');
         
         // Load modules
         await this.loadModules();
@@ -33,11 +33,11 @@ class AdvancedWhatsAppBot {
         // Start WhatsApp connection
         await this.startWhatsApp();
         
-        logger.info('Bot initialized successfully!');
+        logger.info('✅ Bot initialized successfully!');
     }
 
     async loadModules() {
-        logger.info('Loading modules...');
+        logger.info('📦 Loading modules...');
         
         const modulesPath = path.join(__dirname, '../modules');
         await fs.ensureDir(modulesPath);
@@ -46,7 +46,7 @@ class AdvancedWhatsAppBot {
             const files = await fs.readdir(modulesPath);
             
             for (const file of files) {
-                if (file.endsWith('.js') && file !== 'telegram-bridge.js') {
+                if (file.endsWith('.js')) {
                     await this.loadModule(path.join(modulesPath, file));
                 }
             }
@@ -54,7 +54,7 @@ class AdvancedWhatsAppBot {
             logger.error('Error loading modules:', error);
         }
         
-        logger.info(`Loaded ${this.loadedModules.size} modules`); // Corrected: Removed emoji
+        logger.info(`✅ Loaded ${this.loadedModules.size} modules`);
     }
 
     async loadModule(modulePath) {
@@ -69,7 +69,7 @@ class AdvancedWhatsAppBot {
             
             // Validate module structure
             if (!this.validateModule(moduleInstance)) {
-                logger.warn(`Invalid module structure: ${moduleId}`); // Corrected: Removed emoji
+                logger.warn(`⚠️ Invalid module structure: ${moduleId}`);
                 return;
             }
 
@@ -91,9 +91,9 @@ class AdvancedWhatsAppBot {
                 loaded: new Date()
             });
 
-            logger.info(`Loaded module: ${moduleId}`); // Corrected: Removed emoji
+            logger.info(`✅ Loaded module: ${moduleId}`);
         } catch (error) {
-            logger.error(`Failed to load module ${modulePath}:`, error); // Corrected: Removed emoji
+            logger.error(`❌ Failed to load module ${modulePath}:`, error);
         }
     }
 
@@ -127,7 +127,7 @@ class AdvancedWhatsAppBot {
             const { connection, lastDisconnect, qr } = update;
             
             if (qr) {
-                logger.info('Scan QR code with WhatsApp:');
+                logger.info('📱 Scan QR code with WhatsApp:');
                 qrcode.generate(qr, { small: true });
             }
             
@@ -135,10 +135,10 @@ class AdvancedWhatsAppBot {
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
                 
                 if (shouldReconnect && !this.isShuttingDown) {
-                    logger.warn('Connection closed, reconnecting...'); // Corrected: Removed emoji
+                    logger.warn('🔄 Connection closed, reconnecting...');
                     setTimeout(() => this.startWhatsApp(), 5000);
                 } else {
-                    logger.error('Connection closed permanently. Please delete auth_info and restart.'); // Corrected: Removed emoji
+                    logger.error('❌ Connection closed permanently. Please delete auth_info and restart.');
                 }
             } else if (connection === 'open') {
                 await this.onConnectionOpen();
@@ -147,36 +147,15 @@ class AdvancedWhatsAppBot {
 
         this.sock.ev.on('creds.update', saveCreds);
         this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
-        
-        // Listen for call events - only if real-time detection is enabled
-        if (config.get('telegram.settings.enableCallNotifications', true)) {
-            this.sock.ev.on('call', async (callEvents) => {
-                for (const call of callEvents) {
-                    await this.handleCallEvent(call);
-                }
-            });
-        }
-    }
-
-    async handleCallEvent(call) {
-        if (!this.telegramBridge) return;
-
-        try {
-            // Pass call event to telegram bridge for handling
-            await this.telegramBridge.handleCallNotification(call);
-            logger.debug(`Handled call event: ${call.status} from ${call.from.split('@')[0]}`); // Corrected: Removed emoji
-        } catch (error) {
-            logger.error('Error handling call event:', error); // Corrected: Removed emoji
-        }
     }
 
     async onConnectionOpen() {
-        logger.info('Connected to WhatsApp!'); // Corrected: Removed emoji
+        logger.info('✅ Connected to WhatsApp!');
         
         // Set owner if not set
         if (!config.get('bot.owner') && this.sock.user) {
             config.set('bot.owner', this.sock.user.id);
-            logger.info(`Owner set to: ${this.sock.user.id}`); // Corrected: Removed emoji
+            logger.info(`👑 Owner set to: ${this.sock.user.id}`);
         }
 
         // Send startup message to owner
@@ -184,10 +163,7 @@ class AdvancedWhatsAppBot {
         
         // Initialize Telegram bridge connection
         if (this.telegramBridge) {
-            // Note: syncWhatsAppConnection is not defined in telegram-bridge.js.
-            // If this method is intended to exist, it needs to be implemented there.
-            // For now, I'm commenting it out or assuming it's a placeholder.
-            // await this.telegramBridge.syncWhatsAppConnection(); 
+            await this.telegramBridge.syncWhatsAppConnection();
         }
     }
 
@@ -195,26 +171,21 @@ class AdvancedWhatsAppBot {
         const owner = config.get('bot.owner');
         if (!owner) return;
 
-        // Corrected: Formatted as a single template literal and removed emojis.
-        const startupMessage = `*${config.get('bot.name')} v${config.get('bot.version')}* is now online!
-
-*Advanced Features Active:*
-• Modular Architecture
-• Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}
-• Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}
-• Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}
-• Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}
-• Call Notifications: ${config.get('telegram.settings.enableCallNotifications', true) ? '✅' : '❌'}
-• Status Sync: ${config.get('telegram.settings.syncStatus') ? '✅' : '❌'}
-
-Type *${config.get('bot.prefix')}menu* to see all commands!`;
+        const startupMessage = `🚀 *${config.get('bot.name')} v${config.get('bot.version')}* is now online!\n\n` +
+                              `🔥 *Advanced Features Active:*\n` +
+                              `• 📱 Modular Architecture\n` +
+                              `• 🤖 Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
+                              `• 🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
+                              `• 🔧 Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n` +
+                              `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n\n` +
+                              `Type *${config.get('bot.prefix')}menu* to see all commands!`;
 
         try {
             await this.sock.sendMessage(owner, { text: startupMessage });
             
             // Also log to Telegram
             if (this.telegramBridge) {
-                await this.telegramBridge.logToTelegram('WhatsApp Bot Started', startupMessage);
+                await this.telegramBridge.logToTelegram('🚀 WhatsApp Bot Started', startupMessage);
             }
         } catch (error) {
             logger.error('Failed to send startup message:', error);
@@ -229,21 +200,18 @@ Type *${config.get('bot.prefix')}menu* to see all commands!`;
     }
 
     async shutdown() {
-        logger.info('Shutting down bot...'); // Corrected: Removed emoji
+        logger.info('🛑 Shutting down bot...');
         this.isShuttingDown = true;
         
         if (this.telegramBridge) {
-            // Note: shutdown is not explicitly defined in telegram-bridge.js from previous context.
-            // If this method is intended to exist, it needs to be implemented there.
-            // For now, commenting it out or assuming it's a placeholder.
-            // await this.telegramBridge.shutdown(); 
+            await this.telegramBridge.shutdown();
         }
         
         if (this.sock) {
             await this.sock.logout();
         }
         
-        logger.info('Bot shutdown complete'); // Corrected: Removed emoji
+        logger.info('✅ Bot shutdown complete');
     }
 }
 
