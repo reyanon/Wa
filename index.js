@@ -1,3 +1,4 @@
+
 const { AdvancedWhatsAppBot } = require('./core/bot');
 const logger = require('./core/logger');
 
@@ -27,12 +28,9 @@ async function main() {
         });
 
         process.on('unhandledRejection', (reason, promise) => {
-    console.error('💥 Unhandled Rejection:');
-    console.error('Reason:', reason);
-    console.error(reason?.stack || reason);
-    process.exit(1);
-});
-
+            logger.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+            process.exit(1);
+        });
 
     } catch (error) {
         logger.error('💥 Failed to start bot:', error);
