@@ -48,12 +48,21 @@ class TelegramBridge {
     async setupTelegramHandlers() {
         // Handle all types of messages
         this.telegramBot.on('message', async (msg) => {
-            if (msg.chat.type === 'supergroup' && msg.is_topic_message) {
-                await this.handleTelegramMessage(msg);
+            // Check if it's a topic message in a supergroup, or a direct message to the bot
+            // Direct messages to the bot (chat.type === 'private') should also be handled.
+            // For simplicity, assuming messages are handled if it's a supergroup topic message
+            // or if it's a private chat that needs to be mapped to a WhatsApp JID.
+            if ((msg.chat.type === 'supergroup' && msg.is_topic_message) || msg.chat.type === 'private') {
+                await this.handleTelegramMsg(msg);
             }
         });
 
-        // Handle media messages
+        // Specific handlers for media, location, contact, etc., if not covered by general 'message' handler
+        // Ensure these don't duplicate processing with handleTelegramMsg if it's a catch-all
+        // The current handleTelegramMsg checks for specific message types within itself.
+        // These explicit 'on' handlers are more direct for specific message types.
+        // It's good practice to have them, but make sure handleTelegramMsg doesn't re-process these.
+
         this.telegramBot.on('photo', async (msg) => {
             if (msg.chat.type === 'supergroup' && msg.is_topic_message) {
                 await this.handleTelegramMedia(msg, 'photo');
@@ -105,6 +114,13 @@ class TelegramBridge {
         this.telegramBot.on('contact', async (msg) => {
             if (msg.chat.type === 'supergroup' && msg.is_topic_message) {
                 await this.handleTelegramContact(msg);
+            }
+        });
+
+        // Handle replies to status messages in Telegram
+        this.telegramBot.on('message', async (msg) => {
+            if (msg.reply_to_message && msg.chat.type === 'supergroup' && msg.message_thread_id === config.get('telegram.statusTopicId')) {
+                await this.handleStatusReply(msg);
             }
         });
 
@@ -296,11 +312,11 @@ class TelegramBridge {
                 const phone = jid.split('@')[0];
                 
                 welcomeText = `👤 **Contact Information**\n\n` +
-                             `📝 **Name:** ${userInfo?.name || 'Not available'}\n` +
-                             `📱 **Phone:** +${phone}\n` +
-                             `🆔 **WhatsApp ID:** \`${jid}\`\n` +
-                             `📅 **First Contact:** ${new Date().toLocaleDateString()}\n\n` +
-                             `💬 Messages with this contact will appear here`;
+                                 `📝 **Name:** ${userInfo?.name || 'Not available'}\n` +
+                                 `📱 **Phone:** +${phone}\n` +
+                                 `🆔 **WhatsApp ID:** \`${jid}\`\n` +
+                                 `📅 **First Contact:** ${new Date().toLocaleDateString()}\n\n` +
+                                 `💬 Messages with this contact will appear here`;
             }
 
             const sentMessage = await this.telegramBot.sendMessage(chatId, welcomeText, {
@@ -361,8 +377,8 @@ class TelegramBridge {
             const callerName = userInfo?.name || callerId.split('@')[0];
             const callType = callEvent.isVideo ? '📹 Video' : '📞 Voice';
             const status = callEvent.status === 'offer' ? 'Incoming' : 
-                          callEvent.status === 'accept' ? 'Accepted' : 
-                          callEvent.status === 'reject' ? 'Rejected' : 'Ended';
+                            callEvent.status === 'accept' ? 'Accepted' : 
+                            callEvent.status === 'reject' ? 'Rejected' : 'Ended';
 
             // Get or create call topic
             const topicId = await this.getOrCreateTopic('call@broadcast', {
@@ -370,10 +386,10 @@ class TelegramBridge {
             });
 
             const callMessage = `${callType} Call ${status}\n\n` +
-                               `👤 **Caller:** ${callerName}\n` +
-                               `📱 **Number:** +${callerId.split('@')[0]}\n` +
-                               `⏰ **Time:** ${new Date().toLocaleString()}\n` +
-                               `📊 **Status:** ${status}`;
+                                `👤 **Caller:** ${callerName}\n` +
+                                `📱 **Number:** +${callerId.split('@')[0]}\n` +
+                                `⏰ **Time:** ${new Date().toLocaleString()}\n` +
+                                `📊 **Status:** ${status}`;
 
             await this.telegramBot.sendMessage(config.get('telegram.chatId'), callMessage, {
                 message_thread_id: topicId,
@@ -390,7 +406,7 @@ class TelegramBridge {
         try {
             let mediaMessage;
             let fileName = `media_${Date.now()}`;
-            let caption = this.extractText(whatsappMsg);
+            let caption = this.extractText(whatsappMsg); // Calls extractText method
             
             switch (mediaType) {
                 case 'image':
@@ -417,7 +433,7 @@ class TelegramBridge {
 
             // Download media from WhatsApp
             const stream = await downloadContentFromMessage(mediaMessage, mediaType === 'sticker' ? 'sticker' : mediaType);
-            const buffer = await this.streamToBuffer(stream);
+            const buffer = await this.streamToBuffer(stream); // Calls streamToBuffer method
             
             const filePath = path.join(this.tempDir, fileName);
             await fs.writeFile(filePath, buffer);
@@ -516,59 +532,83 @@ class TelegramBridge {
         }
     }
 
-      async handleTelegramMsg(msg) {
-    try {
-      if (!msg) return;
+    async handleTelegramMsg(msg) {
+        try {
+            if (!msg) return;
 
-      const chatId = msg.chat.id;
-      const whatsappChatJid = this.mapTelegramChatToWhatsApp(chatId);
-
-      // Handle albums (media groups)
-      if (msg.grouped_id) {
-        // Albums are handled in a separate event handler, so skip here
-        return;
-      }
-
-      // Handle text messages with spoiler formatting
-      if (msg.text) {
-        const text = msg.text.trim();
-
-        // Detect Telegram spoiler markdown: ||spoiler||
-        const isSpoiler = text.startsWith('||') && text.endsWith('||');
-        if (isSpoiler) {
-          const spoilerText = text.slice(2, -2).trim();
-
-          // Send as WhatsApp view once message (imageMessage with caption as workaround)
-          await this.whatsappBot.sock.sendMessage(whatsappChatJid, {
-            viewOnceMessage: {
-              message: {
-                imageMessage: {
-                  caption: spoilerText,
-                  jpegThumbnail: Buffer.alloc(0) // empty thumbnail placeholder
-                }
-              }
+            const whatsappChatJid = this.mapTelegramChatToWhatsApp(msg.message_thread_id || msg.chat.id); // Use topic ID if available, else chat ID
+            if (!whatsappChatJid) {
+                logger.warn(`⚠️ Could not map Telegram chat ID ${msg.chat.id} (or topic ${msg.message_thread_id}) to WhatsApp JID.`);
+                return;
             }
-          });
-          return;
+
+            // Handle albums (media groups) - node-telegram-bot-api handles these with 'mediaGroup' event
+            if (msg.media_group_id) {
+                // If you have a separate 'mediaGroup' handler, you can skip here.
+                // Otherwise, you'd need to collect messages belonging to the same media group
+                // and send them as an album to WhatsApp. For simplicity, we'll assume
+                // handleTelegramMedia handles individual media within a group.
+                logger.debug('Skipping message that is part of a media group, will be handled by specific media handlers if configured.');
+                return;
+            }
+
+            // Handle text messages with spoiler formatting
+            if (msg.text) {
+                const text = msg.text.trim();
+
+                // Detect Telegram spoiler markdown: ||spoiler||
+                const isSpoiler = text.startsWith('||') && text.endsWith('||');
+                if (isSpoiler) {
+                    const spoilerText = text.slice(2, -2).trim();
+
+                    // Send as WhatsApp view once message (imageMessage with caption as workaround)
+                    await this.whatsappBot.sock.sendMessage(whatsappChatJid, {
+                        viewOnceMessage: {
+                            message: {
+                                imageMessage: {
+                                    caption: spoilerText,
+                                    jpegThumbnail: Buffer.alloc(0) // empty thumbnail placeholder
+                                }
+                            }
+                        }
+                    });
+                    return;
+                }
+
+                // Normal text forwarding
+                await this.whatsappBot.sock.sendMessage(whatsappChatJid, { text });
+                return;
+            }
+
+            // Handle media messages (photo, video, audio, voice, document, sticker)
+            // The specific 'on' handlers for each media type will call handleTelegramMedia directly.
+            // If this general handler is called and msg.media is present, it means the specific handler didn't fire,
+            // or we need a fallback.
+            if (msg.photo || msg.video || msg.voice || msg.audio || msg.document || msg.sticker || msg.video_note) {
+                 // The specific handlers should catch these first. If we reach here,
+                 // it's a fallback or a type not explicitly caught by 'on' handlers.
+                 // The handleTelegramMedia is called by the specific handlers above.
+                 // This block can be removed if all media types are covered by specific on handlers.
+                 logger.debug('Media message received, expecting specific handler to process:', msg);
+                 return;
+            }
+
+            // Handle location and contact messages if not already handled by specific 'on' handlers
+            if (msg.location) {
+                await this.handleTelegramLocation(msg);
+                return;
+            }
+            if (msg.contact) {
+                await this.handleTelegramContact(msg);
+                return;
+            }
+
+            // If no recognized content, ignore or log
+            logger.info('Unhandled Telegram message type:', msg);
+        } catch (error) {
+            logger.error('Error handling Telegram message:', error);
         }
-
-        // Normal text forwarding
-        await this.whatsappBot.sock.sendMessage(whatsappChatJid, { text });
-        return;
-      }
-
-      // Handle media messages (photo, video, audio, voice, document, sticker)
-      if (msg.media) {
-        await this.handleTelegramMedia(msg, whatsappChatJid);
-        return;
-      }
-
-      // If no recognized content, ignore or log
-      console.log('Unhandled Telegram message type:', msg);
-    } catch (error) {
-      console.error('Error handling Telegram message:', error);
     }
-  }
 
     async handleStatusReply(msg) {
         try {
@@ -593,135 +633,124 @@ class TelegramBridge {
         }
     }
 
-    async handleTelegramMedia(msg, whatsappChatJid) {
-    // Determine media type and file id
-    let mediaType = null;
-    let fileId = null;
+    async handleTelegramMedia(msg, mediaType) { // mediaType passed from specific telegramBot.on handlers
+        let fileId = null;
+        let mimeType = null;
+        let fileName = null;
+        let caption = msg.caption || '';
+        let whatsappMsgPayload = null;
 
-    if (msg.photo) {
-      mediaType = 'photo';
-      // Telegram photo sizes array, get highest quality
-      const photos = msg.photo;
-      fileId = photos[photos.length - 1].file_id;
-    } else if (msg.video) {
-      mediaType = 'video';
-      fileId = msg.video.file_id;
-    } else if (msg.voice) {
-      mediaType = 'voice';
-      fileId = msg.voice.file_id;
-    } else if (msg.audio) {
-      mediaType = 'audio';
-      fileId = msg.audio.file_id;
-    } else if (msg.document) {
-      mediaType = 'document';
-      fileId = msg.document.file_id;
-    } else if (msg.sticker) {
-      mediaType = 'sticker';
-      fileId = msg.sticker.file_id;
-    } else {
-      console.log('Unsupported media type');
-      return;
+        if (mediaType === 'photo') {
+            const photos = msg.photo;
+            fileId = photos[photos.length - 1].file_id; // Get highest quality photo
+            mimeType = 'image/jpeg'; // Telegram photos are usually JPEG
+            fileName = `${fileId}.jpg`;
+        } else if (mediaType === 'video') {
+            fileId = msg.video.file_id;
+            mimeType = msg.video.mime_type || 'video/mp4';
+            fileName = msg.video.file_name || `${fileId}.mp4`;
+        } else if (mediaType === 'voice') {
+            fileId = msg.voice.file_id;
+            mimeType = msg.voice.mime_type || 'audio/ogg';
+            fileName = `${fileId}.ogg`;
+        } else if (mediaType === 'audio') {
+            fileId = msg.audio.file_id;
+            mimeType = msg.audio.mime_type || 'audio/mpeg';
+            fileName = msg.audio.file_name || `${fileId}.mp3`;
+        } else if (mediaType === 'document') {
+            fileId = msg.document.file_id;
+            mimeType = msg.document.mime_type || 'application/octet-stream';
+            fileName = msg.document.file_name || `${fileId}.${mime.extension(mimeType) || 'bin'}`;
+        } else if (mediaType === 'sticker') {
+            fileId = msg.sticker.file_id;
+            mimeType = msg.sticker.mime_type || 'image/webp';
+            fileName = `${fileId}.webp`;
+        } else if (mediaType === 'video_note') {
+            fileId = msg.video_note.file_id;
+            mimeType = msg.video_note.mime_type || 'video/mp4'; // Video notes are typically mp4
+            fileName = `${fileId}.mp4`;
+        } else {
+            logger.warn('Unsupported Telegram media type received:', mediaType);
+            return;
+        }
+
+        if (!fileId) {
+            logger.error('Could not get fileId for Telegram media.');
+            return;
+        }
+
+        const telegramChatId = msg.chat.id;
+        const topicId = msg.message_thread_id;
+        const whatsappChatJid = this.findWhatsAppJidByTopic(topicId); // Map Telegram topic to WhatsApp JID
+
+        if (!whatsappChatJid) {
+            logger.warn(`⚠️ Could not find WhatsApp chat for Telegram media (chat ID: ${telegramChatId}, topic ID: ${topicId}).`);
+            await this.telegramBot.sendMessage(telegramChatId, '❌ Could not find corresponding WhatsApp chat to forward this message.', {
+                message_thread_id: topicId
+            });
+            return;
+        }
+
+        // Download media locally
+        const fileLink = await this.telegramBot.getFileLink(fileId);
+        const filePath = path.join(this.tempDir, fileName);
+
+        try {
+            await this.downloadFile(fileLink, filePath); // Use downloadFile utility method
+
+            // Prepare WhatsApp message payload based on media type
+            if (mediaType === 'photo') {
+                whatsappMsgPayload = { image: { url: filePath }, caption: caption };
+            } else if (mediaType === 'video') {
+                whatsappMsgPayload = { video: { url: filePath }, caption: caption, mimetype: mimeType };
+            } else if (mediaType === 'voice') {
+                // Convert to WhatsApp compatible voice note (OPUS)
+                const whatsappVoicePath = path.join(this.tempDir, `${fileId}_wa_voice.ogg`);
+                await this.convertToWhatsAppVoice(filePath, whatsappVoicePath);
+                const waveform = await this.generateWaveform(whatsappVoicePath);
+                whatsappMsgPayload = { audio: { url: whatsappVoicePath, ptt: true, waveform: waveform }, mimetype: 'audio/ogg; codecs=opus' };
+            } else if (mediaType === 'audio') {
+                whatsappMsgPayload = { audio: { url: filePath }, caption: caption, mimetype: mimeType };
+            } else if (mediaType === 'document') {
+                whatsappMsgPayload = { document: { url: filePath, fileName: fileName, mimetype: mimeType }, caption: caption };
+            } else if (mediaType === 'sticker') {
+                whatsappMsgPayload = { sticker: { url: filePath } };
+            } else if (mediaType === 'video_note') {
+                // Convert video note to a WhatsApp friendly format (mp4 with specific dimensions)
+                const whatsappVideoNotePath = path.join(this.tempDir, `${fileId}_wa_videonote.mp4`);
+                await this.convertVideoNote(filePath, whatsappVideoNotePath);
+                whatsappMsgPayload = { video: { url: whatsappVideoNotePath, gifPlayback: true }, mimetype: 'video/mp4' };
+            }
+
+            if (!whatsappMsgPayload) {
+                logger.warn('No WhatsApp message payload created for Telegram media type:', mediaType);
+                return;
+            }
+
+            // Send media message to WhatsApp
+            const sentWaMsg = await this.whatsappBot.sock.sendMessage(whatsappChatJid, whatsappMsgPayload);
+
+            // React to the Telegram message to confirm forwarding
+            if (sentWaMsg) {
+                await this.telegramBot.setMessageReaction(telegramChatId, msg.message_id, [{ type: 'emoji', emoji: '👍' }], { message_thread_id: topicId });
+            }
+
+        } catch (error) {
+            logger.error(`❌ Failed to handle Telegram ${mediaType} message:`, error);
+            await this.telegramBot.setMessageReaction(telegramChatId, msg.message_id, [{ type: 'emoji', emoji: '❌' }], { message_thread_id: topicId });
+        } finally {
+            // Clean up temp files
+            await fs.unlink(filePath).catch(() => {});
+            // If voice or video note, also clean up converted files
+            if (mediaType === 'voice') {
+                await fs.unlink(path.join(this.tempDir, `${fileId}_wa_voice.ogg`)).catch(() => {});
+            }
+            if (mediaType === 'video_note') {
+                await fs.unlink(path.join(this.tempDir, `${fileId}_wa_videonote.mp4`)).catch(() => {});
+            }
+        }
     }
-
-    // Download media locally
-    const fileLink = await this.telegramBot.getFileLink(fileId);
-    const ext = mime.extension(msg[mediaType]?.mime_type) || 'bin';
-    const fileName = `${fileId}.${ext}`;
-    const filePath = path.join(this.tempDir, fileName);
-
-    await this.downloadFile(fileLink, filePath);
-
-    // Prepare WhatsApp message payload
-    let whatsappMsg = null;
-
-    if (mediaType === 'photo' || mediaType === 'sticker') {
-      whatsappMsg = {
-        imageMessage: {
-          caption: msg.caption || '',
-          jpegThumbnail: fs.readFileSync(filePath)
-        }
-      };
-    } else if (mediaType === 'video') {
-      whatsappMsg = {
-        videoMessage: {
-          caption: msg.caption || '',
-          fileName,
-          mimetype: msg.video.mime_type || 'video/mp4',
-          url: filePath
-        }
-      };
-    } else if (mediaType === 'voice' || (mediaType === 'audio' && msg.audio?.voice)) {
-      // Send as WhatsApp voice note with waveform
-      whatsappMsg = {
-        audioMessage: {
-          mimetype: msg[mediaType].mime_type || 'audio/ogg',
-          ptt: true,
-          fileName,
-          url: filePath
-        }
-      };
-    } else if (mediaType === 'audio') {
-      // Regular audio file
-      whatsappMsg = {
-        audioMessage: {
-          mimetype: msg.audio.mime_type || 'audio/mpeg',
-          fileName,
-          url: filePath
-        }
-      };
-    } else if (mediaType === 'document') {
-      whatsappMsg = {
-        documentMessage: {
-          title: msg.document.file_name || fileName,
-          fileName: msg.document.file_name || fileName,
-          mimetype: msg.document.mime_type || 'application/octet-stream',
-          url: filePath
-        }
-      };
-    }
-
-    if (!whatsappMsg) {
-      console.log('No WhatsApp message payload created for media');
-      return;
-    }
-
-    // Send media message to WhatsApp
-    await this.whatsappBot.sock.sendMessage(whatsappChatJid, whatsappMsg);
-
-    // Optionally delete temp file after sending
-    try {
-      fs.unlinkSync(filePath);
-    } catch (e) {
-      console.warn('Failed to delete temp file:', filePath);
-    }
-  }
-
-  // Utility to download a file from URL to local path
-  async downloadFile(url, dest) {
-    const writer = fs.createWriteStream(dest);
-    const response = await axios({
-      url,
-      method: 'GET',
-      responseType: 'stream'
-    });
-
-    response.data.pipe(writer);
-
-    return new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-    });
-  }
-
-  // Map Telegram chat ID to WhatsApp JID (implement your own mapping logic)
-  mapTelegramChatToWhatsApp(telegramChatId) {
-    // Example: map Telegram chat ID to WhatsApp JID stored in config or mapping
-    const mapping = this.config.telegramToWhatsAppMap || {};
-    return mapping[telegramChatId] || `${telegramChatId}@s.whatsapp.net`;
-  }
-}
-
-
+    
     async handleTelegramLocation(msg) {
         try {
             const topicId = msg.message_thread_id;
@@ -729,20 +758,23 @@ class TelegramBridge {
 
             if (!whatsappJid) {
                 logger.warn('⚠️ Could not find WhatsApp chat for Telegram location');
+                await this.telegramBot.sendMessage(msg.chat.id, '❌ Could not find corresponding WhatsApp chat to forward this location.', {
+                    message_thread_id: topicId
+                });
                 return;
             }
 
-            await this.whatsappBot.sendMessage(whatsappJid, { 
+            await this.whatsappBot.sock.sendMessage(whatsappJid, { 
                 location: { 
                     degreesLatitude: msg.location.latitude, 
                     degreesLongitude: msg.location.longitude
                 } 
             });
 
-            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👍' }]);
+            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👍' }], { message_thread_id: topicId });
         } catch (error) {
             logger.error('❌ Failed to handle Telegram location message:', error);
-            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }]);
+            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }], { message_thread_id: topicId });
         }
     }
 
@@ -753,6 +785,9 @@ class TelegramBridge {
 
             if (!whatsappJid) {
                 logger.warn('⚠️ Could not find WhatsApp chat for Telegram contact');
+                await this.telegramBot.sendMessage(msg.chat.id, '❌ Could not find corresponding WhatsApp chat to forward this contact.', {
+                    message_thread_id: topicId
+                });
                 return;
             }
 
@@ -763,17 +798,17 @@ class TelegramBridge {
 
             const vcard = `BEGIN:VCARD\nVERSION:3.0\nN:${lastName};${firstName};;;\nFN:${displayName}\nTEL;TYPE=CELL:${phoneNumber}\nEND:VCARD`;
 
-            await this.whatsappBot.sendMessage(whatsappJid, { 
+            await this.whatsappBot.sock.sendMessage(whatsappJid, { 
                 contacts: { 
                     displayName: displayName, 
                     contacts: [{ vcard: vcard }]
                 } 
             });
 
-            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👍' }]);
+            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👍' }], { message_thread_id: topicId });
         } catch (error) {
             logger.error('❌ Failed to handle Telegram contact message:', error);
-            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }]);
+            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }], { message_thread_id: topicId });
         }
     }
 
@@ -785,10 +820,17 @@ class TelegramBridge {
                 .format('mp4')
                 .outputOptions([
                     '-movflags +faststart',
+                    // Scale to 640x640, maintaining aspect ratio and padding if needed
                     '-vf scale=640:640:force_original_aspect_ratio=decrease,pad=640:640:(ow-iw)/2:(oh-ih)/2'
                 ])
-                .on('end', resolve)
-                .on('error', reject)
+                .on('end', () => {
+                    logger.debug(`Video note converted: ${inputPath} -> ${outputPath}`);
+                    resolve();
+                })
+                .on('error', (err) => {
+                    logger.error(`Error converting video note ${inputPath}:`, err);
+                    reject(err);
+                })
                 .save(outputPath);
         });
     }
@@ -801,8 +843,14 @@ class TelegramBridge {
                 .audioChannels(1)
                 .audioFrequency(16000)
                 .audioBitrate('24k')
-                .on('end', resolve)
-                .on('error', reject)
+                .on('end', () => {
+                    logger.debug(`Audio converted to WhatsApp voice: ${inputPath} -> ${outputPath}`);
+                    resolve();
+                })
+                .on('error', (err) => {
+                    logger.error(`Error converting audio to WhatsApp voice ${inputPath}:`, err);
+                    reject(err);
+                })
                 .save(outputPath);
         });
     }
@@ -810,16 +858,19 @@ class TelegramBridge {
     async generateWaveform(audioPath) {
         try {
             const duration = await this.getAudioDuration(audioPath);
-            const samples = Math.min(Math.floor(duration), 60);
+            const samples = Math.min(Math.floor(duration), 60); // Max 60 samples for waveform
             const waveform = [];
             
+            // Generate random values for waveform (placeholder logic)
+            // A more advanced implementation would analyze audio amplitude
             for (let i = 0; i < samples; i++) {
-                waveform.push(Math.floor(Math.random() * 100) + 1);
+                waveform.push(Math.floor(Math.random() * 100) + 1); // Values 1-100
             }
             
             return Buffer.from(waveform);
         } catch (error) {
-            return Buffer.from([50, 75, 25, 100, 60, 80, 40, 90, 30, 70]);
+            logger.warn('Could not generate waveform, using default:', error.message);
+            return Buffer.from([50, 75, 25, 100, 60, 80, 40, 90, 30, 70]); // Default waveform
         }
     }
 
@@ -827,6 +878,7 @@ class TelegramBridge {
         return new Promise((resolve, reject) => {
             ffmpeg.ffprobe(audioPath, (err, metadata) => {
                 if (err) {
+                    logger.error(`Error getting audio duration for ${audioPath}:`, err);
                     reject(err);
                 } else {
                     resolve(Math.floor(metadata.format.duration || 0));
@@ -844,7 +896,7 @@ class TelegramBridge {
             // Add sender info for status messages
             let messageText = text;
             if (sender === 'status@broadcast') {
-                const participant = this.findParticipantFromStatusMessage(text);
+                const participant = this.findParticipantFromStatusMessage(text); // Needs to be defined
                 if (participant) {
                     const userInfo = this.userMappings.get(participant);
                     const name = userInfo?.name || participant.split('@')[0];
@@ -856,76 +908,115 @@ class TelegramBridge {
                 message_thread_id: topicId,
                 parse_mode: 'Markdown'
             });
-
             return sentMessage.message_id;
         } catch (error) {
-            logger.error('❌ Failed to send message to Telegram:', error);
+            logger.error('❌ Failed to send simple message to Telegram:', error);
             return null;
         }
     }
 
+    // Utility to download a file from URL to local path
+    async downloadFile(url, dest) {
+        const writer = fs.createWriteStream(dest);
+        const response = await axios({
+            url,
+            method: 'GET',
+            responseType: 'stream'
+        });
+
+        response.data.pipe(writer);
+
+        return new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', (err) => {
+                logger.error(`Error downloading file from ${url} to ${dest}:`, err);
+                reject(err);
+            });
+        });
+    }
+
+    // Maps a Telegram chat ID (or topic ID) to a WhatsApp JID
+    mapTelegramChatToWhatsApp(telegramChatIdentifier) {
+        // This mapping logic needs to be robust based on how your system links them.
+        // If a direct map from config is used:
+        const map = config.get('telegram.telegramToWhatsAppMap') || {};
+        // Check if the identifier is a topic ID first (which is a number)
+        if (typeof telegramChatIdentifier === 'number') {
+            // Reverse lookup: Find WA JID by Telegram Topic ID
+            for (let [waJid, tgTopicId] of this.chatMappings.entries()) {
+                if (tgTopicId === telegramChatIdentifier) {
+                    return waJid;
+                }
+            }
+        }
+        // Fallback or if direct chat ID is used for private chats
+        return map[telegramChatIdentifier] || null; // Return null if no mapping found
+    }
+
+    // Finds WhatsApp JID given a Telegram topic ID (inverse of this.chatMappings)
+    findWhatsAppJidByTopic(telegramTopicId) {
+        for (let [waJid, tgTopicId] of this.chatMappings.entries()) {
+            if (tgTopicId === telegramTopicId) {
+                return waJid;
+            }
+        }
+        return null;
+    }
+
+    // Extracts text caption from a WhatsApp message object
+    extractText(whatsappMsg) {
+        if (whatsappMsg.message?.conversation) {
+            return whatsappMsg.message.conversation;
+        }
+        if (whatsappMsg.message?.extendedTextMessage?.text) {
+            return whatsappMsg.message.extendedTextMessage.text;
+        }
+        if (whatsappMsg.message?.imageMessage?.caption) {
+            return whatsappMsg.message.imageMessage.caption;
+        }
+        if (whatsappMsg.message?.videoMessage?.caption) {
+            return whatsappMsg.message.videoMessage.caption;
+        }
+        if (whatsappMsg.message?.documentMessage?.caption) {
+            return whatsappMsg.message.documentMessage.caption;
+        }
+        if (whatsappMsg.message?.stickerMessage?.caption) { // Stickers can have captions
+            return whatsappMsg.message.stickerMessage.caption;
+        }
+        return '';
+    }
+
+    // Converts a readable stream to a Buffer
+    streamToBuffer(stream) {
+        return new Promise((resolve, reject) => {
+            const chunks = [];
+            stream.on('data', chunk => chunks.push(chunk));
+            stream.on('end', () => resolve(Buffer.concat(chunks)));
+            stream.on('error', reject);
+        });
+    }
+
+    // Placeholder for finding participant from status message text
     findParticipantFromStatusMessage(text) {
-        // This would need to be implemented based on how you track status messages
-        // For now, return null
-        return null;
-    }
-
-    async streamToBuffer(stream) {
-        const chunks = [];
-        for await (const chunk of stream) {
-            chunks.push(chunk);
-        }
-        return Buffer.concat(chunks);
-    }
-
-    findWhatsAppJidByTopic(topicId) {
-        for (const [jid, topic] of this.chatMappings.entries()) {
-            if (topic === topicId) {
-                return jid;
-            }
-        }
-        return null;
-    }
-
-    extractText(msg) {
-        return msg.message?.conversation ||
-               msg.message?.extendedTextMessage?.text ||
-               msg.message?.imageMessage?.caption ||
-               msg.message?.videoMessage?.caption ||
-               msg.message?.documentMessage?.caption ||
-               msg.message?.audioMessage?.caption ||
-               '';
-    }
-
-    async syncWhatsAppConnection() {
-        if (!this.telegramBot) return;
-
-        await this.logToTelegram('🤖 WhatsApp Bot Connected', 
-            `✅ Bot: ${config.get('bot.name')} v${config.get('bot.version')}\n` +
-            `📱 WhatsApp: Connected\n` +
-            `🔗 Telegram Bridge: Active\n` +
-            `🚀 Ready to bridge messages!`);
-    }
-
-    async shutdown() {
-        logger.info('🛑 Shutting down Telegram bridge...');
-        if (this.telegramBot) {
-            try {
-                await this.telegramBot.stopPolling();
-                logger.info('📱 Telegram bot polling stopped.');
-            } catch (error) {
-                logger.debug('Error stopping Telegram polling:', error);
-            }
+        // This is a placeholder. You need to implement logic to reliably extract
+        // a WhatsApp JID or phone number from the text of a status message.
+        // Example: if your status messages are formatted like "New status from +1234567890: Bla bla"
+        const match = text.match(/\+\(?(\d{1,})\)?[\s-]?(\d{1,})[\s-]?(\d{1,})@s\.whatsapp\.net/); // Simple regex for common phone number formats in JID
+        if (match) {
+            // Reconstruct the full JID from the matched parts if necessary, or just return the relevant group
+            // For example, if it's always in the format '1234567890@s.whatsapp.net'
+            const phoneNumber = match[1] + match[2] + match[3]; // Combine groups if phone number is split by spaces/dashes
+            return `${phoneNumber}@s.whatsapp.net`;
         }
         
-        // Clean up temp directory
-        try {
-            await fs.emptyDir(this.tempDir);
-            logger.info('🧹 Temp directory cleaned.');
-        } catch (error) {
-            logger.debug('Could not clean temp directory:', error);
+        // As a very loose fallback, try to find any number that looks like a phone number and append WhatsApp suffix
+        const potentialPhoneMatch = text.match(/\b(\d{10,15})\b/); // Looks for 10-15 digit numbers
+        if (potentialPhoneMatch && potentialPhoneMatch[1]) {
+            return `${potentialPhoneMatch[1]}@s.whatsapp.net`;
         }
-        logger.info('✅ Telegram bridge shutdown complete.');
+
+        logger.debug('Could not extract participant from status message text:', text);
+        return null; // Return null if no participant can be reliably found
     }
 }
 
