@@ -11,7 +11,7 @@ const ffmpegStatic = require('ffmpeg-static');
 const mime = require('mime-types');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
-const TelegramMessageHandler = require('./telegram-message-handler'); // NEW
+const TelegramMessageHandler = require('..core//telegram-message-handler'); // NEW
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
