@@ -44,20 +44,16 @@ if (ffmpegStatic) {
 class TelegramBridge {
     constructor(whatsappBot) {
         this.whatsappBot = whatsappBot;
-        this.name = 'telegram-bridge';
-        this.version = '2.0.0';
-        this.description = 'Complete Telegram Bridge with Spoiler Media and Reaction Confirmations';
-        
-        // Core properties
         this.telegramBot = null;
         this.chatMappings = new Map(); // WhatsApp JID -> Telegram Topic ID
         this.messagePairs = new Map(); // Telegram Message ID -> WhatsApp Message Info
-        this.userMappings = new Map(); // WhatsApp User -> Contact Info
+        this.userMappings = new Map(); // WhatsApp User -> Telegram User Data
         this.profilePicCache = new Map(); // User -> Profile Pic URL
         this.tempDir = path.join(__dirname, '../temp');
-        this.activeCallNotifications = new Map();
-        this.statusMessageIds = new Map();
-        this.callHistory = new Map();
+        this.isProcessing = false;
+        this.activeCallNotifications = new Map(); // Track active calls to prevent spam
+        this.statusMessageIds = new Map(); // Track status message IDs for replies
+        this.callHistory = new Map(); // Track call history to avoid duplicates
         
         // Configuration
         this.config = {
@@ -752,6 +748,7 @@ class TelegramBridge {
             
             this.stats.mediaForwarded++;
             return sentMessage?.message_id;
+
         } catch (error) {
             logger.error(`❌ Failed to handle WhatsApp ${mediaType}:`, error);
             return null;
