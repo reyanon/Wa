@@ -28,11 +28,40 @@ class Config {
                 useTopics: true, // Set to false if your group doesn't use topics
                 logChannel: '-1002287300661', // Same as chatId for logging, or a different channel I
                 settings: {
-                    enableCallNotifications: true,
-                    autoUpdateProfilePics: true, // Added missing comma here
-                    syncContacts: true,
-                    syncStatus: true,
-                    syncCalls: true
+// Media processing
+skipVideoStickers: false,
+skipDocuments: false,
+skipImages: false,
+skipVideos: false,
+skipAudios: false,
+skipStickers: false,
+skipContacts: false,
+skipLocations: false,
+
+// Confirmation system
+confirmationType: 'emoji', // emoji, text, none
+silentConfirmation: false,
+
+// Advanced features
+spoilerViewOnce: true,
+reactions: true,
+sendPresence: true,
+sendMyPresence: true,
+
+// Profile pictures
+syncProfilePictures: true,
+profilePicUpdateInterval: 3600000, // 1 hour
+
+// Audio/Video quality
+generateWaveforms: true,
+audioQuality: 'medium',
+videoQuality: 'medium',
+maxVideoSize: 50 * 1024 * 1024,
+
+// Sticker processing
+stickerFallbackToPng: true,
+animatedStickerToGif: true
+
                 }
             },
             database: {
