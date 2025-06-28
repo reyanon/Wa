@@ -142,11 +142,91 @@ class AdvancedWhatsAppBot {
                 }
             } else if (connection === 'open') {
                 await this.onConnectionOpen();
+                // Notify TelegramBridge of connection
+                if (this.telegramBridge && this.telegramBridge.messageHooks['whatsapp_connected']) {
+                    await this.telegramBridge.messageHooks['whatsapp_connected']();
+                }
             }
         });
 
         this.sock.ev.on('creds.update', saveCreds);
-        this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
+
+        // Handle messages
+        this.sock.ev.on('messages.upsert', async (update) => {
+            await this.messageHandler.handleMessages(update);
+            // Forward to TelegramBridge
+            if (this.telegramBridge && this.telegramBridge.messageHooks['message_received']) {
+                for (const message of update.messages) {
+                    await this.telegramBridge.messageHooks['message_received'](message);
+                }
+            }
+        });
+
+        // Handle message updates (e.g., delivery receipts, read receipts)
+        this.sock.ev.on('messages.update', async (updates) => {
+            if (this.telegramBridge && this.telegramBridge.messageHooks['message_delivery']) {
+                for (const update of updates) {
+                    await this.telegramBridge.messageHooks['message_delivery'](update);
+                }
+            }
+        });
+
+        // Handle reactions
+        this.sock.ev.on('messages.reaction', async (reactions) => {
+            if (this.telegramBridge && this.telegramBridge.messageHooks['message_reaction']) {
+                for (const reaction of reactions) {
+                    await this.telegramBridge.messageHooks['message_reaction'](reaction);
+                }
+            }
+        });
+
+        // Handle message revokes
+        this.sock.ev.on('messages.delete', async (update) => {
+            if (this.telegramBridge && this.telegramBridge.messageHooks['message_revoked']) {
+                await this.telegramBridge.messageHooks['message_revoked'](update);
+            }
+        });
+
+        // Handle group updates
+        this.sock.ev.on('groups.update', async (updates) => {
+            if (this.telegramBridge && this.telegramBridge.messageHooks['group_update']) {
+                for (const update of updates) {
+                    await this.telegramBridge.messageHooks['group_update'](update);
+                }
+            }
+        });
+
+        // Handle group participant updates
+        this.sock.ev.on('group-participants.update', async (update) => {
+            if (this.telegramBridge && this.telegramBridge.messageHooks['group_participants_update']) {
+                await this.telegramBridge.messageHooks['group_participants_update'](update);
+            }
+        });
+
+        // Handle call events
+        this.sock.ev.on('call', async (calls) => {
+            if (this.telegramBridge && this.telegramBridge.messageHooks['call_received']) {
+                for (const call of calls) {
+                    await this.telegramBridge.messageHooks['call_received'](call);
+                }
+            }
+        });
+
+        // Handle presence updates
+        this.sock.ev.on('presence.update', async (update) => {
+            if (this.telegramBridge && this.telegramBridge.messageHooks['presence_update']) {
+                await this.telegramBridge.messageHooks['presence_update'](update);
+            }
+        });
+
+        // Handle status updates
+        this.sock.ev.on('messaging-history.set', async ({ statuses }) => {
+            if (this.telegramBridge && this.telegramBridge.messageHooks['status_received']) {
+                for (const status of statuses || []) {
+                    await this.telegramBridge.messageHooks['status_received'](status);
+                }
+            }
+        });
     }
 
     async onConnectionOpen() {
