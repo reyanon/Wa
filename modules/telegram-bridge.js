@@ -25,7 +25,7 @@ class TelegramBridge {
         const token = config.get('telegram.botToken');
         const chatId = config.get('telegram.chatId');
         
-        if (!token || token.includes('YOUR_BOT_TOKEN') || !chatId || chatId.includes('YOUR_CHAT_ID')) {
+        if (!token || token.includes('7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI') || !chatId || chatId.includes('-1002287300661')) {
             logger.warn('⚠️ Telegram bot token or chat ID not configured properly');
             return;
         }
