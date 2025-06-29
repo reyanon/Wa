@@ -34,7 +34,7 @@ class Config {
             telegram: {
                 enabled: true,
                 botToken: '7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI',
-                chhatId: '-1002287300661',
+                chatId: '-1002287300661',
                 adminIds: [7580382614],
                 sudoUsers: [7580382614],
                 features: {
