@@ -1,28 +1,20 @@
-const {
-    default: makeWASocket,
-    DisconnectReason,
-    fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
-
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs-extra');
 const path = require('path');
+
 const config = require('../config');
 const logger = require('./logger');
-const ModuleLoader = require('./module-manager');
 const MessageHandler = require('./message-handler');
-const { useMongoAuthState } = require('../utils/mongoAuthState');
 
-class NexusWA {
+class AdvancedWhatsAppBot {
     constructor() {
         this.sock = null;
-        this.isShuttingDown = false;
         this.authPath = './auth_info';
-        this.startTime = new Date();
-
-        this.moduleLoader = new ModuleLoader(this);
         this.messageHandler = new MessageHandler(this);
-
+        this.isShuttingDown = false;
+        this.loadedModules = new Map();
+        this.startTime = new Date();
         this.stats = {
             messagesReceived: 0,
             messagesSent: 0,
@@ -32,30 +24,116 @@ class NexusWA {
     }
 
     async initialize() {
-        logger.info('🔧 Initializing NexusWA...');
-
-        await this.moduleLoader.loadModules();
+        logger.info('🔧 Initializing Advanced WhatsApp Bot...');
+        
+        // Load modules
+        await this.loadModules();
+        
+        // Start WhatsApp connection
         await this.startWhatsApp();
+        
+        logger.info('✅ Bot initialized successfully!');
+    }
 
-        logger.info('✅ NexusWA initialized successfully!');
+    async loadModules() {
+        logger.info('📦 Loading modules...');
+        
+        const modulesPath = path.join(__dirname, '../modules');
+        await fs.ensureDir(modulesPath);
+
+        try {
+            const files = await fs.readdir(modulesPath);
+            
+            for (const file of files) {
+                if (file.endsWith('.js') && !file.includes('telegram-bridge-bot')) {
+                    await this.loadModule(path.join(modulesPath, file));
+                }
+            }
+        } catch (error) {
+            logger.error('Error loading modules:', error);
+        }
+        
+        logger.info(`✅ Loaded ${this.loadedModules.size} modules`);
+    }
+
+    async loadModule(modulePath) {
+        try {
+            const moduleId = path.basename(modulePath, '.js');
+            
+            // Clear require cache for hot reloading
+            delete require.cache[require.resolve(modulePath)];
+            
+            const ModuleClass = require(modulePath);
+            const moduleInstance = new ModuleClass(this);
+            
+            // Validate module structure
+            if (!this.validateModule(moduleInstance)) {
+                logger.warn(`⚠️ Invalid module structure: ${moduleId}`);
+                return;
+            }
+
+            // Initialize module
+            if (moduleInstance.init) {
+                await moduleInstance.init();
+            }
+
+            // Register commands
+            if (moduleInstance.commands) {
+                for (const command of moduleInstance.commands) {
+                    this.messageHandler.registerCommandHandler(command.name, command);
+                }
+            }
+
+            // Register message hooks
+            if (moduleInstance.messageHooks) {
+                for (const [hookName, handler] of Object.entries(moduleInstance.messageHooks)) {
+                    this.messageHandler.registerMessageHook(hookName, handler.bind(moduleInstance));
+                }
+            }
+
+            this.loadedModules.set(moduleId, {
+                instance: moduleInstance,
+                path: modulePath,
+                loaded: new Date()
+            });
+
+            logger.info(`✅ Loaded module: ${moduleId}`);
+        } catch (error) {
+            logger.error(`❌ Failed to load module ${modulePath}:`, error);
+        }
+    }
+
+    validateModule(module) {
+        return (
+            module &&
+            typeof module === 'object' &&
+            module.name &&
+            module.version &&
+            (module.commands || module.messageHooks)
+        );
     }
 
     async startWhatsApp() {
-        if (config.get('bot.clearAuthOnStart')) {
-            await fs.remove(this.authPath);
-            logger.info('🧹 Cleared auth data');
+        // Clear auth if corrupted
+        if (config.get('bot.clearAuthOnStart', false)) {
+            try {
+                await fs.remove(this.authPath);
+                logger.info('🧹 Cleared authentication data');
+            } catch (error) {
+                logger.debug('No auth data to clear');
+            }
         }
 
-        const { state, saveCreds } = await useMongoAuthState();
+        const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
         const { version } = await fetchLatestBaileysVersion();
 
         this.sock = makeWASocket({
-            version,
             auth: state,
+            version,
             printQRInTerminal: false,
             logger: logger.child({ module: 'baileys' }),
+            getMessage: async (key) => ({ conversation: 'Message not found' }),
             generateHighQualityLinkPreview: true,
-            getMessage: async () => ({ conversation: 'Message not found' }),
             markOnlineOnConnect: false
         });
 
@@ -65,20 +143,20 @@ class NexusWA {
     setupEventHandlers(saveCreds) {
         this.sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
-
+            
             if (qr) {
-                logger.info('📱 Scan QR to login:');
+                logger.info('📱 Scan QR code with WhatsApp:');
                 qrcode.generate(qr, { small: true });
             }
-
+            
             if (connection === 'close') {
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-
+                
                 if (shouldReconnect && !this.isShuttingDown) {
                     logger.warn('🔄 Connection closed, reconnecting...');
                     setTimeout(() => this.startWhatsApp(), 5000);
                 } else {
-                    logger.error('❌ Connection closed permanently. Please delete auth and restart.');
+                    logger.error('❌ Connection closed permanently. Please delete auth_info and restart.');
                 }
             } else if (connection === 'open') {
                 await this.onConnectionOpen();
@@ -86,13 +164,12 @@ class NexusWA {
         });
 
         this.sock.ev.on('creds.update', saveCreds);
-
         this.sock.ev.on('messages.upsert', async (m) => {
-            logger.debug(`🟢 messages.upsert type=${m.type} count=${m.messages.length}`);
             this.stats.messagesReceived += m.messages.length;
             await this.messageHandler.handleMessages(m);
         });
 
+        // Handle call events
         this.sock.ev.on('call', async (calls) => {
             for (const call of calls) {
                 await this.messageHandler.triggerMessageHooks('call_received', { call });
@@ -102,36 +179,38 @@ class NexusWA {
 
     async onConnectionOpen() {
         logger.info('✅ Connected to WhatsApp!');
-
+        
+        // Set owner if not set
         if (!config.get('bot.owner') && this.sock.user) {
             config.set('bot.owner', this.sock.user.id);
-            logger.info(`👑 Owner set to ${this.sock.user.id}`);
+            logger.info(`👑 Owner set to: ${this.sock.user.id}`);
         }
 
+        // Send startup message to owner
         await this.sendStartupMessage();
-        await this.messageHandler.triggerMessageHooks('whatsapp_connected', { user: this.sock.user });
+        
+        // Trigger connection hooks
+        await this.messageHandler.triggerMessageHooks('whatsapp_connected', { 
+            user: this.sock.user 
+        });
     }
 
     async sendStartupMessage() {
         const owner = config.get('bot.owner');
         if (!owner) return;
 
-        const modulesCount = this.moduleLoader.listModules().length;
-        const mode = config.get('features.mode');
-        const telegramBridge = config.get('features.telegramBridge') ? "✅ Enabled" : "❌ Disabled";
-
-        const message =
-            `🚀 *Welcome to NexusWA v${config.get('bot.version')}*\n\n` +
-            `📦 *Modules Loaded*: ${modulesCount}\n` +
-            `⚙️ *Bot Mode*: ${mode}\n` +
-            `🤖 *Telegram Bridge*: ${telegramBridge}\n\n` +
-            `🛠️ *How to use NexusWA:*\n` +
-            `• Type *${config.get('bot.prefix')}menu* to see bot commands and settings\n` +
-            `• Type *${config.get('bot.prefix')}help* to see module commands\n\n` +
-            `Happy automating with *NexusWA* 🚀`;
+        const modulesList = Array.from(this.loadedModules.keys()).join(', ');
+        const startupMessage = `🚀 *${config.get('bot.name')} v${config.get('bot.version')}* is now online!\n\n` +
+                              `🔥 *System Status:*\n` +
+                              `• 📱 WhatsApp: Connected\n` +
+                              `• 🔧 Modules: ${this.loadedModules.size} loaded\n` +
+                              `• 📦 Active Modules: ${modulesList}\n` +
+                              `• 🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
+                              `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n\n` +
+                              `Type *${config.get('bot.prefix')}menu* to see all commands!`;
 
         try {
-            await this.sock.sendMessage(owner, { text: message });
+            await this.sock.sendMessage(owner, { text: startupMessage });
             this.stats.messagesSent++;
         } catch (error) {
             logger.error('Failed to send startup message:', error);
@@ -140,7 +219,9 @@ class NexusWA {
     }
 
     async sendMessage(jid, content) {
-        if (!this.sock) throw new Error('WhatsApp socket not initialized.');
+        if (!this.sock) {
+            throw new Error('WhatsApp socket not initialized');
+        }
         const result = await this.sock.sendMessage(jid, content);
         this.stats.messagesSent++;
         return result;
@@ -151,34 +232,37 @@ class NexusWA {
             ...this.stats,
             uptime: Date.now() - this.startTime.getTime(),
             startTime: this.startTime,
-            loadedModules: this.moduleLoader.listModules(),
+            loadedModules: Array.from(this.loadedModules.keys()),
             isConnected: !!this.sock?.user
         };
     }
 
-    getModuleInstance(name) {
-        return this.moduleLoader.getModule(name);
+    getModuleInstance(moduleName) {
+        const module = this.loadedModules.get(moduleName);
+        return module ? module.instance : null;
     }
 
     async shutdown() {
-        logger.info('🛑 Shutting down NexusWA...');
+        logger.info('🛑 Shutting down bot...');
         this.isShuttingDown = true;
-
-        for (const name of this.moduleLoader.listModules()) {
-            const mod = this.moduleLoader.getModule(name);
+        
+        // Shutdown all modules
+        for (const [name, module] of this.loadedModules) {
             try {
-                if (mod?.shutdown) await mod.shutdown();
-            } catch (err) {
-                logger.error(`Error shutting down module ${name}:`, err);
+                if (module.instance.shutdown) {
+                    await module.instance.shutdown();
+                }
+            } catch (error) {
+                logger.error(`Error shutting down module ${name}:`, error);
             }
         }
-
+        
         if (this.sock) {
-            await this.sock.end();
+            await this.sock.logout();
         }
-
-        logger.info('✅ NexusWA shutdown complete.');
+        
+        logger.info('✅ Bot shutdown complete');
     }
 }
 
-module.exports = { NexusWA };
+module.exports = { AdvancedWhatsAppBot };
