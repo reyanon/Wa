@@ -34,23 +34,17 @@ class Config {
             telegram: {
                 enabled: true,
                 botToken: '7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI',
-                chatId: '-1002287300661',
-                ownerIds: [7580382614],
+                groupId: '-1002287300661',
+                adminIds: [7580382614],
                 sudoUsers: [7580382614],
-                confirmationType: 'emoji', // emoji, text, none
-                sendPresence: true,
-                sendReadReceipts: true,
-                reactions: true,
-                spoilerViewOnce: true,
-                skipVideoStickers: false,
-                // Media type toggles
-                skipImages: false,
-                skipVideos: false,
-                skipAudios: false,
-                skipDocuments: false,
-                skipStickers: false,
-                skipContacts: false,
-                skipLocations: false
+                features: {
+                    topics: true,
+                    mediaSync: true,
+                    profilePicSync: true,
+                    callLogs: true,
+                    statusSync: true,
+                    biDirectional: true
+                }
             },
             logging: {
                 level: 'info',
