@@ -516,48 +516,59 @@ class TelegramBridge {
         }
     }
 
-    async handleTelegramMessage(msg) {
-        // Skip if message has media (handled by specific media handlers)
-        if (msg.photo || msg.video || msg.video_note || msg.voice || msg.audio || msg.document || msg.sticker || msg.location || msg.contact) {
+async handleTelegramMessage(msg) {
+    // Ignore media or non-text messages
+    if (
+        !msg.text ||
+        msg.photo || msg.video || msg.video_note ||
+        msg.voice || msg.audio || msg.document ||
+        msg.sticker || msg.location || msg.contact
+    ) return;
+
+    try {
+        const topicId = msg.message_thread_id;
+        const whatsappJid = this.findWhatsAppJidByTopic(topicId);
+
+        if (!whatsappJid) {
+            logger.warn('⚠️ Could not find WhatsApp chat for Telegram message');
             return;
         }
 
-        if (!msg.text) return;
-        
-        try {
-            const topicId = msg.message_thread_id;
-            const whatsappJid = this.findWhatsAppJidByTopic(topicId);
-            
-            if (!whatsappJid) {
-                logger.warn('⚠️ Could not find WhatsApp chat for Telegram message');
-                return;
-            }
+        // Special handling for status replies
+        if (whatsappJid === 'status@broadcast' && msg.reply_to_message) {
+            await this.handleStatusReply(msg);
+            return;
+        }
 
-            // Handle status reply
-            if (whatsappJid === 'status@broadcast' && msg.reply_to_message) {
-                await this.handleStatusReply(msg);
-                return;
-            }
+        // ✅ Send to WhatsApp and capture result
+        const sendResult = await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
 
-            // Send to WhatsApp
-            await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
-            
-            // React with thumbs up when message is delivered to WhatsApp
+        // ✅ Only react if WhatsApp API confirms it
+        if (sendResult?.key?.id && this.config.confirmationType === 'emoji') {
             try {
-                await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👍' }]);
+                await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, {
+                    reaction: [{ type: 'emoji', emoji: '👍' }]
+                });
             } catch (reactionError) {
-                logger.debug('Could not set delivery reaction:', reactionError);
-            }
-
-        } catch (error) {
-            logger.error('❌ Failed to handle Telegram message:', error);
-            try {
-                await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }]);
-            } catch (reactionError) {
-                logger.debug('Could not set error reaction:', reactionError);
+                logger.debug('Could not set success reaction:', reactionError);
             }
         }
+
+    } catch (error) {
+        logger.error('❌ Failed to handle Telegram message:', error);
+
+        // ❌ React on failure (optional)
+        try {
+            if (this.config.confirmationType === 'emoji') {
+                await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, {
+                    reaction: [{ type: 'emoji', emoji: '❌' }]
+                });
+            }
+        } catch (reactionError) {
+            logger.debug('Could not set error reaction:', reactionError);
+        }
     }
+}
 
     async handleStatusReply(msg) {
         try {
