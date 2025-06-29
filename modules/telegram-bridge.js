@@ -19,6 +19,7 @@ class TelegramBridge {
         this.isProcessing = false;
         this.activeCallNotifications = new Map(); // Track active calls to prevent spam
         this.statusMessageIds = new Map(); // Track status message IDs for replies
+        this.presenceTimeout = null; // For managing presence
     }
 
     async initialize() {
@@ -34,7 +35,11 @@ class TelegramBridge {
             // Ensure temp directory exists
             await fs.ensureDir(this.tempDir);
             
-            this.telegramBot = new TelegramBot(token, { polling: true });
+            this.telegramBot = new TelegramBot(token, { 
+                polling: true,
+                onlyFirstMatch: true
+            });
+            
             await this.setupTelegramHandlers();
             logger.info('✅ Telegram bridge initialized');
         } catch (error) {
@@ -56,19 +61,35 @@ class TelegramBridge {
     }
 
     async setupTelegramHandlers() {
-        // Handle all types of messages
-        this.telegramBot.on('message', async (msg) => {
+        // Handle all types of messages with error wrapping
+        this.telegramBot.on('message', this.wrapHandler(async (msg) => {
             if (msg.chat.type === 'supergroup' && msg.is_topic_message) {
                 await this.handleTelegramMessage(msg);
             }
+        }));
+
+        // Handle polling errors
+        this.telegramBot.on('polling_error', (error) => {
+            logger.error('Telegram polling error:', error);
         });
 
-        // Handle errors
+        // Handle general errors
         this.telegramBot.on('error', (error) => {
             logger.error('Telegram bot error:', error);
         });
 
         logger.info('📱 Telegram message handlers set up');
+    }
+
+    // Wrapper to catch unhandled promise rejections
+    wrapHandler(handler) {
+        return async (...args) => {
+            try {
+                await handler(...args);
+            } catch (error) {
+                logger.error('❌ Unhandled error in Telegram handler:', error);
+            }
+        };
     }
 
     async logToTelegram(title, message) {
@@ -453,6 +474,45 @@ class TelegramBridge {
         }
     }
 
+    // Send presence when user is typing/active in Telegram
+    async sendPresence(jid, isTyping = false) {
+        try {
+            if (!this.whatsappBot.sock) return;
+            
+            const presence = isTyping ? 'composing' : 'available';
+            await this.whatsappBot.sock.sendPresenceUpdate(presence, jid);
+            
+            // Clear previous timeout
+            if (this.presenceTimeout) {
+                clearTimeout(this.presenceTimeout);
+            }
+            
+            // Set presence back to unavailable after 10 seconds
+            this.presenceTimeout = setTimeout(async () => {
+                try {
+                    await this.whatsappBot.sock.sendPresenceUpdate('unavailable', jid);
+                } catch (error) {
+                    logger.debug('Failed to send unavailable presence:', error);
+                }
+            }, 10000);
+            
+        } catch (error) {
+            logger.debug('Failed to send presence:', error);
+        }
+    }
+
+    // Mark messages as read in WhatsApp
+    async markAsRead(jid, messageKeys) {
+        try {
+            if (!this.whatsappBot.sock || !messageKeys.length) return;
+            
+            await this.whatsappBot.sock.readMessages(messageKeys);
+            logger.debug(`📖 Marked ${messageKeys.length} messages as read in ${jid}`);
+        } catch (error) {
+            logger.debug('Failed to mark messages as read:', error);
+        }
+    }
+
     async handleTelegramMessage(msg) {
         try {
             const topicId = msg.message_thread_id;
@@ -462,6 +522,9 @@ class TelegramBridge {
                 logger.warn('⚠️ Could not find WhatsApp chat for Telegram message');
                 return;
             }
+
+            // Send presence when user is active
+            await this.sendPresence(whatsappJid, false);
 
             // Handle different message types
             if (msg.photo) {
@@ -489,10 +552,27 @@ class TelegramBridge {
                     return;
                 }
 
+                // Send typing presence
+                await this.sendPresence(whatsappJid, true);
+
                 // Send text message to WhatsApp
-                const sendResult = await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
+                const messageOptions = { text: msg.text };
+                
+                // Handle spoiler messages (messages with spoiler entities)
+                if (msg.entities && msg.entities.some(entity => entity.type === 'spoiler')) {
+                    // For spoiler messages, we can add a special marker or send as view once
+                    messageOptions.text = `🫥 ${msg.text}`;
+                }
+
+                const sendResult = await this.whatsappBot.sendMessage(whatsappJid, messageOptions);
+                
                 if (sendResult?.key?.id) {
                     await this.setReaction(msg.chat.id, msg.message_id, '👍');
+                    
+                    // Mark the sent message as read immediately (simulating read receipt)
+                    setTimeout(async () => {
+                        await this.markAsRead(whatsappJid, [sendResult.key]);
+                    }, 1000);
                 }
             }
         } catch (error) {
@@ -533,6 +613,9 @@ class TelegramBridge {
                 logger.warn('⚠️ Could not find WhatsApp chat for Telegram media');
                 return;
             }
+
+            // Send presence when user is sending media
+            await this.sendPresence(whatsappJid, false);
 
             let fileId, fileName, caption = msg.caption || '';
             
@@ -581,55 +664,65 @@ class TelegramBridge {
 
             // Send to WhatsApp based on media type
             let sendResult;
+            let messageOptions = {};
+
+            // Handle spoiler media (if message has spoiler caption)
+            const hasMediaSpoiler = msg.has_media_spoiler || 
+                (msg.caption_entities && msg.caption_entities.some(entity => entity.type === 'spoiler'));
+
             switch (mediaType) {
                 case 'photo':
-                    sendResult = await this.whatsappBot.sendMessage(whatsappJid, {
+                    messageOptions = {
                         image: fs.readFileSync(filePath),
-                        caption: caption
-                    });
+                        caption: caption,
+                        viewOnce: hasMediaSpoiler // Send as view once if spoiler
+                    };
                     break;
                     
                 case 'video':
                 case 'video_note':
-                    sendResult = await this.whatsappBot.sendMessage(whatsappJid, {
+                    messageOptions = {
                         video: fs.readFileSync(filePath),
                         caption: caption,
-                        ptv: mediaType === 'video_note' // Push-to-talk video for video notes
-                    });
+                        ptv: mediaType === 'video_note', // Push-to-talk video for video notes
+                        viewOnce: hasMediaSpoiler // Send as view once if spoiler
+                    };
                     break;
                     
                 case 'voice':
-                    sendResult = await this.whatsappBot.sendMessage(whatsappJid, {
+                    messageOptions = {
                         audio: fs.readFileSync(filePath),
                         ptt: true, // Push-to-talk for voice messages
                         mimetype: 'audio/ogg; codecs=opus'
-                    });
+                    };
                     break;
                     
                 case 'audio':
-                    sendResult = await this.whatsappBot.sendMessage(whatsappJid, {
+                    messageOptions = {
                         audio: fs.readFileSync(filePath),
                         mimetype: mime.lookup(fileName) || 'audio/mp3',
                         fileName: fileName,
                         caption: caption
-                    });
+                    };
                     break;
                     
                 case 'document':
-                    sendResult = await this.whatsappBot.sendMessage(whatsappJid, {
+                    messageOptions = {
                         document: fs.readFileSync(filePath),
                         fileName: fileName,
                         mimetype: mime.lookup(fileName) || 'application/octet-stream',
                         caption: caption
-                    });
+                    };
                     break;
                     
                 case 'sticker':
-                    sendResult = await this.whatsappBot.sendMessage(whatsappJid, {
+                    messageOptions = {
                         sticker: fs.readFileSync(filePath)
-                    });
+                    };
                     break;
             }
+
+            sendResult = await this.whatsappBot.sendMessage(whatsappJid, messageOptions);
 
             // Clean up temp file
             await fs.unlink(filePath).catch(() => {});
@@ -638,6 +731,11 @@ class TelegramBridge {
             if (sendResult?.key?.id) {
                 logger.info(`✅ Successfully sent ${mediaType} to WhatsApp`);
                 await this.setReaction(msg.chat.id, msg.message_id, '👍');
+                
+                // Mark as read after sending
+                setTimeout(async () => {
+                    await this.markAsRead(whatsappJid, [sendResult.key]);
+                }, 1000);
             } else {
                 logger.warn(`⚠️ Failed to send ${mediaType} to WhatsApp - no message ID returned`);
                 await this.setReaction(msg.chat.id, msg.message_id, '❌');
@@ -659,6 +757,8 @@ class TelegramBridge {
                 return;
             }
 
+            await this.sendPresence(whatsappJid, false);
+
             const sendResult = await this.whatsappBot.sendMessage(whatsappJid, { 
                 location: { 
                     degreesLatitude: msg.location.latitude, 
@@ -668,6 +768,9 @@ class TelegramBridge {
 
             if (sendResult?.key?.id) {
                 await this.setReaction(msg.chat.id, msg.message_id, '👍');
+                setTimeout(async () => {
+                    await this.markAsRead(whatsappJid, [sendResult.key]);
+                }, 1000);
             }
         } catch (error) {
             logger.error('❌ Failed to handle Telegram location message:', error);
@@ -685,6 +788,8 @@ class TelegramBridge {
                 return;
             }
 
+            await this.sendPresence(whatsappJid, false);
+
             const firstName = msg.contact.first_name || '';
             const lastName = msg.contact.last_name || '';
             const phoneNumber = msg.contact.phone_number || '';
@@ -701,6 +806,9 @@ class TelegramBridge {
 
             if (sendResult?.key?.id) {
                 await this.setReaction(msg.chat.id, msg.message_id, '👍');
+                setTimeout(async () => {
+                    await this.markAsRead(whatsappJid, [sendResult.key]);
+                }, 1000);
             }
         } catch (error) {
             logger.error('❌ Failed to handle Telegram contact message:', error);
@@ -784,6 +892,12 @@ class TelegramBridge {
 
     async shutdown() {
         logger.info('🛑 Shutting down Telegram bridge...');
+        
+        // Clear presence timeout
+        if (this.presenceTimeout) {
+            clearTimeout(this.presenceTimeout);
+        }
+        
         if (this.telegramBot) {
             try {
                 await this.telegramBot.stopPolling();
