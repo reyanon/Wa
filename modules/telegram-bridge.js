@@ -1,6 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const config = require('../config');
-const logger = require('../src/logger');
+const logger = require('../core/logger');
 const fs = require('fs-extra');
 const path = require('path');
 const axios = require('axios');
