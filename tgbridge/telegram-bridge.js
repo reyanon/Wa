@@ -138,112 +138,40 @@ class TelegramBridge {
         }
     }
 
-    async syncMessage(whatsappMsg, text) {
-        if (!this.telegramBot || !config.get('telegram.enabled')) return;
+async syncMessage(whatsappMsg, text) {
+    logger.debug(`Message structure: ${JSON.stringify(whatsappMsg.message)}`);
+    if (!this.telegramBot || !config.get('telegram.enabled')) return;
 
-        try {
-            const sender = whatsappMsg.key.remoteJid;
-            const participant = whatsappMsg.key.participant || sender;
-            
-            logger.info(`📨 Processing WhatsApp message from ${sender}`, {
-                messageKeys: Object.keys(whatsappMsg.message || {}),
-                hasText: !!text,
-                participant,
-                messageId: whatsappMsg.key.id
-            });
-            
-            // Create user mapping if not exists
-            await this.createUserMapping(participant, whatsappMsg);
-            
-            // Get or create topic for this chat
-            const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
-            if (!topicId) {
-                logger.error('❌ Could not get or create topic for message');
-                return;
-            }
-            
-            // Handle different message types - check the actual message structure
-            const message = whatsappMsg.message;
-            if (!message) {
-                logger.debug('⚠️ No message content found');
-                return;
-            }
+    const sender = whatsappMsg.key.remoteJid;
+    const participant = whatsappMsg.key.participant || sender;
+    await this.createUserMapping(participant, whatsappMsg);
+    const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
 
-            // Log all available message types for debugging
-            const messageTypes = Object.keys(message);
-            logger.debug(`📋 Available message types: ${messageTypes.join(', ')}`);
-
-            // Check for media messages first - FIXED DETECTION LOGIC
-            let handled = false;
-
-            if (message.imageMessage) {
-                logger.info('📸 Processing image message');
-                await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
-                handled = true;
-            } 
-            
-            if (message.videoMessage) {
-                logger.info('🎥 Processing video message');
-                await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
-                handled = true;
-            } 
-            
-            if (message.audioMessage) {
-                logger.info('🎵 Processing audio message');
-                await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
-                handled = true;
-            } 
-            
-            if (message.documentMessage) {
-                logger.info('📄 Processing document message');
-                await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
-                handled = true;
-            } 
-            
-            if (message.stickerMessage) {
-                logger.info('🎭 Processing sticker message');
-                await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
-                handled = true;
-            } 
-            
-            if (message.locationMessage) { 
-                logger.info('📍 Processing location message');
-                await this.handleWhatsAppLocation(whatsappMsg, topicId);
-                handled = true;
-            } 
-            
-            if (message.contactMessage || message.contactsArrayMessage) { 
-                logger.info('👤 Processing contact message');
-                await this.handleWhatsAppContact(whatsappMsg, topicId);
-                handled = true;
-            }
-            
-            // Handle text messages (including captions)
-            if (text && text.trim()) {
-                logger.info('💬 Processing text message');
-                const messageId = await this.sendSimpleMessage(topicId, text, sender);
-                
-                // Store status message ID for reply handling
-                if (sender === 'status@broadcast') {
-                    this.statusMessageIds.set(messageId, whatsappMsg.key);
-                }
-                handled = true;
-            }
-            
-            // If no handler processed the message, log it for debugging
-            if (!handled) {
-                logger.warn('⚠️ Unhandled message type:', {
-                    messageTypes,
-                    hasText: !!text,
-                    messageStructure: JSON.stringify(message, null, 2).substring(0, 500)
-                });
-            }
-            
-        } catch (error) {
-            logger.error('❌ Error in syncMessage:', error);
+    // Prioritize media checks
+    if (whatsappMsg.message?.imageMessage) {
+        await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
+    } else if (whatsappMsg.message?.videoMessage) {
+        await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
+    } else if (whatsappMsg.message?.audioMessage) {
+        await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
+    } else if (whatsappMsg.message?.documentMessage) {
+        await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
+    } else if (whatsappMsg.message?.stickerMessage) {
+        await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
+    } else if (whatsappMsg.message?.locationMessage) { 
+        await this.handleWhatsAppLocation(whatsappMsg, topicId);
+    } else if (whatsappMsg.message?.contactMessage) { 
+        await this.handleWhatsAppContact(whatsappMsg, topicId);
+    } else if (text && !whatsappMsg.message?.imageMessage?.caption && !whatsappMsg.message?.videoMessage?.caption) {
+        // Only send as text if no media caption
+        const messageId = await this.sendSimpleMessage(topicId, text, sender);
+        if (sender === 'status@broadcast') {
+            this.statusMessageIds.set(messageId, whatsappMsg.key);
         }
+    } else {
+        logger.warn(`Unhandled message type: ${JSON.stringify(whatsappMsg.message)}`);
     }
-
+}
     async createUserMapping(participant, whatsappMsg) {
         if (this.userMappings.has(participant)) return;
 
