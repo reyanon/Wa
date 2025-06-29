@@ -6,8 +6,8 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const TelegramBridge = require('../tgbridge/telegram-bridge');
-const WhatsAppMessageSyncDetector = require('../tgbridge/message-sync');
+const TelegramBridge = require('./bridge');
+
 
 class AdvancedWhatsAppBot {
     constructor() {
@@ -27,7 +27,6 @@ class AdvancedWhatsAppBot {
         
         // Initialize Telegram bridge if enabled
         if (config.get('telegram.enabled') && config.get('telegram.botToken')) {
-            this.telegramBridge = new TelegramBridge(this);
             await this.telegramBridge.initialize();
         }
 
