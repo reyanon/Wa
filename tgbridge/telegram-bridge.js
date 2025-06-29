@@ -307,42 +307,45 @@ class TelegramBridge {
         }
     }
 
-    async handleCallNotification(callEvent) {
-        if (!this.telegramBot) return;
+async handleCallNotification(callEvent) {
+    if (!this.telegramBot) return;
 
-        const callerId = callEvent.from;
-        const callKey = `${callerId}_${callEvent.id}`;
+    const callerId = callEvent.from;
+    const callKey = `${callerId}_${callEvent.id}`;
 
-        // Prevent spam - only send one notification per call
-        if (this.activeCallNotifications.has(callKey)) return;
+    // Prevent spam - only send one notification per call
+    if (this.activeCallNotifications.has(callKey)) return;
+    
+    this.activeCallNotifications.set(callKey, true);
+    
+    // Clear after 30 seconds
+    setTimeout(() => {
+        this.activeCallNotifications.delete(callKey);
+    }, 30000);
+
+    try {
+        const userInfo = this.userMappings.get(callerId);
+        const callerName = userInfo?.name || `+${callerId.split('@')[0]}`;
+        const phoneNumber = callerId.split('@')[0];
         
-        this.activeCallNotifications.set(callKey, true);
-        
-        // Clear after 30 seconds
-        setTimeout(() => {
-            this.activeCallNotifications.delete(callKey);
-        }, 30000);
+        // Get or create call topic
+        const topicId = await this.getOrCreateTopic('call@broadcast', {
+            key: { remoteJid: 'call@broadcast', participant: callerId }
+        });
 
-        try {
-            const userInfo = this.userMappings.get(callerId);
-            const callerName = userInfo?.name || callerId.split('@')[0];
-            
-            // Get or create call topic
-            const topicId = await this.getOrCreateTopic('call@broadcast', {
-                key: { remoteJid: 'call@broadcast', participant: callerId }
-            });
+        // Simple call message format
+        const callMessage = `📞 ${callerName} 📱 ${new Date().toLocaleTimeString()}\n\nYou received a call`;
 
-            const callMessage = `📞 Incoming call from +${callerId.split('@')[0]}`;
+        await this.telegramBot.sendMessage(config.get('telegram.chatId'), callMessage, {
+            message_thread_id: topicId
+        });
 
-            await this.telegramBot.sendMessage(config.get('telegram.chatId'), callMessage, {
-                message_thread_id: topicId
-            });
-
-            logger.debug(`📞 Sent call notification from ${callerName}`);
-        } catch (error) {
-            logger.error('❌ Error handling call notification:', error);
-        }
+        logger.debug(`📞 Sent call notification from ${callerName}`);
+    } catch (error) {
+        logger.error('❌ Error handling call notification:', error);
     }
+}
+
 
 async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
     try {
