@@ -138,40 +138,196 @@ class TelegramBridge {
         }
     }
 
-async syncMessage(whatsappMsg, text) {
-    logger.debug(`Message structure: ${JSON.stringify(whatsappMsg.message)}`);
-    if (!this.telegramBot || !config.get('telegram.enabled')) return;
+    async syncMessage(whatsappMsg, text) {
+        if (!this.telegramBot || !config.get('telegram.enabled')) return;
 
-    const sender = whatsappMsg.key.remoteJid;
-    const participant = whatsappMsg.key.participant || sender;
-    await this.createUserMapping(participant, whatsappMsg);
-    const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
+        try {
+            const sender = whatsappMsg.key.remoteJid;
+            const participant = whatsappMsg.key.participant || sender;
+            
+            // COMPREHENSIVE DEBUG LOGGING
+            logger.info(`🔍 DEBUGGING WhatsApp message from ${sender}`);
+            logger.info(`📋 Message Key:`, JSON.stringify(whatsappMsg.key, null, 2));
+            
+            if (whatsappMsg.message) {
+                logger.info(`📋 Message Object Keys: ${Object.keys(whatsappMsg.message).join(', ')}`);
+                
+                // Log the FULL message structure for debugging
+                logger.info(`📋 FULL Message Structure:`, JSON.stringify(whatsappMsg.message, null, 2));
+                
+                // Check each media type specifically
+                if (whatsappMsg.message.imageMessage) {
+                    logger.info(`📸 IMAGE MESSAGE DETECTED:`, {
+                        url: whatsappMsg.message.imageMessage.url,
+                        mimetype: whatsappMsg.message.imageMessage.mimetype,
+                        fileLength: whatsappMsg.message.imageMessage.fileLength,
+                        caption: whatsappMsg.message.imageMessage.caption
+                    });
+                }
+                
+                if (whatsappMsg.message.videoMessage) {
+                    logger.info(`🎥 VIDEO MESSAGE DETECTED:`, {
+                        url: whatsappMsg.message.videoMessage.url,
+                        mimetype: whatsappMsg.message.videoMessage.mimetype,
+                        fileLength: whatsappMsg.message.videoMessage.fileLength,
+                        caption: whatsappMsg.message.videoMessage.caption
+                    });
+                }
+                
+                if (whatsappMsg.message.audioMessage) {
+                    logger.info(`🎵 AUDIO MESSAGE DETECTED:`, {
+                        url: whatsappMsg.message.audioMessage.url,
+                        mimetype: whatsappMsg.message.audioMessage.mimetype,
+                        fileLength: whatsappMsg.message.audioMessage.fileLength,
+                        ptt: whatsappMsg.message.audioMessage.ptt
+                    });
+                }
+                
+                if (whatsappMsg.message.documentMessage) {
+                    logger.info(`📄 DOCUMENT MESSAGE DETECTED:`, {
+                        url: whatsappMsg.message.documentMessage.url,
+                        mimetype: whatsappMsg.message.documentMessage.mimetype,
+                        fileLength: whatsappMsg.message.documentMessage.fileLength,
+                        fileName: whatsappMsg.message.documentMessage.fileName
+                    });
+                }
+                
+                if (whatsappMsg.message.stickerMessage) {
+                    logger.info(`🎭 STICKER MESSAGE DETECTED:`, {
+                        url: whatsappMsg.message.stickerMessage.url,
+                        mimetype: whatsappMsg.message.stickerMessage.mimetype,
+                        fileLength: whatsappMsg.message.stickerMessage.fileLength
+                    });
+                }
+            } else {
+                logger.warn(`⚠️ NO MESSAGE OBJECT FOUND!`);
+                return;
+            }
+            
+            // Create user mapping if not exists
+            await this.createUserMapping(participant, whatsappMsg);
+            
+            // Get or create topic for this chat
+            const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
+            if (!topicId) {
+                logger.error('❌ Could not get or create topic for message');
+                return;
+            }
+            
+            // Handle different message types with DETAILED LOGGING
+            const message = whatsappMsg.message;
+            let handled = false;
 
-    // Prioritize media checks
-    if (whatsappMsg.message?.imageMessage) {
-        await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
-    } else if (whatsappMsg.message?.videoMessage) {
-        await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
-    } else if (whatsappMsg.message?.audioMessage) {
-        await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
-    } else if (whatsappMsg.message?.documentMessage) {
-        await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
-    } else if (whatsappMsg.message?.stickerMessage) {
-        await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
-    } else if (whatsappMsg.message?.locationMessage) { 
-        await this.handleWhatsAppLocation(whatsappMsg, topicId);
-    } else if (whatsappMsg.message?.contactMessage) { 
-        await this.handleWhatsAppContact(whatsappMsg, topicId);
-    } else if (text && !whatsappMsg.message?.imageMessage?.caption && !whatsappMsg.message?.videoMessage?.caption) {
-        // Only send as text if no media caption
-        const messageId = await this.sendSimpleMessage(topicId, text, sender);
-        if (sender === 'status@broadcast') {
-            this.statusMessageIds.set(messageId, whatsappMsg.key);
+            // Check for media messages with EXPLICIT LOGGING
+            if (message.imageMessage) {
+                logger.info('🔥 ATTEMPTING TO PROCESS IMAGE MESSAGE');
+                try {
+                    await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
+                    logger.info('✅ IMAGE MESSAGE PROCESSED SUCCESSFULLY');
+                    handled = true;
+                } catch (error) {
+                    logger.error('❌ FAILED TO PROCESS IMAGE MESSAGE:', error);
+                }
+            } 
+            
+            if (message.videoMessage) {
+                logger.info('🔥 ATTEMPTING TO PROCESS VIDEO MESSAGE');
+                try {
+                    await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
+                    logger.info('✅ VIDEO MESSAGE PROCESSED SUCCESSFULLY');
+                    handled = true;
+                } catch (error) {
+                    logger.error('❌ FAILED TO PROCESS VIDEO MESSAGE:', error);
+                }
+            } 
+            
+            if (message.audioMessage) {
+                logger.info('🔥 ATTEMPTING TO PROCESS AUDIO MESSAGE');
+                try {
+                    await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
+                    logger.info('✅ AUDIO MESSAGE PROCESSED SUCCESSFULLY');
+                    handled = true;
+                } catch (error) {
+                    logger.error('❌ FAILED TO PROCESS AUDIO MESSAGE:', error);
+                }
+            } 
+            
+            if (message.documentMessage) {
+                logger.info('🔥 ATTEMPTING TO PROCESS DOCUMENT MESSAGE');
+                try {
+                    await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
+                    logger.info('✅ DOCUMENT MESSAGE PROCESSED SUCCESSFULLY');
+                    handled = true;
+                } catch (error) {
+                    logger.error('❌ FAILED TO PROCESS DOCUMENT MESSAGE:', error);
+                }
+            } 
+            
+            if (message.stickerMessage) {
+                logger.info('🔥 ATTEMPTING TO PROCESS STICKER MESSAGE');
+                try {
+                    await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
+                    logger.info('✅ STICKER MESSAGE PROCESSED SUCCESSFULLY');
+                    handled = true;
+                } catch (error) {
+                    logger.error('❌ FAILED TO PROCESS STICKER MESSAGE:', error);
+                }
+            } 
+            
+            if (message.locationMessage) { 
+                logger.info('🔥 ATTEMPTING TO PROCESS LOCATION MESSAGE');
+                try {
+                    await this.handleWhatsAppLocation(whatsappMsg, topicId);
+                    logger.info('✅ LOCATION MESSAGE PROCESSED SUCCESSFULLY');
+                    handled = true;
+                } catch (error) {
+                    logger.error('❌ FAILED TO PROCESS LOCATION MESSAGE:', error);
+                }
+            } 
+            
+            if (message.contactMessage || message.contactsArrayMessage) { 
+                logger.info('🔥 ATTEMPTING TO PROCESS CONTACT MESSAGE');
+                try {
+                    await this.handleWhatsAppContact(whatsappMsg, topicId);
+                    logger.info('✅ CONTACT MESSAGE PROCESSED SUCCESSFULLY');
+                    handled = true;
+                } catch (error) {
+                    logger.error('❌ FAILED TO PROCESS CONTACT MESSAGE:', error);
+                }
+            }
+            
+            // Handle text messages (including captions)
+            if (text && text.trim()) {
+                logger.info('🔥 ATTEMPTING TO PROCESS TEXT MESSAGE');
+                try {
+                    const messageId = await this.sendSimpleMessage(topicId, text, sender);
+                    
+                    // Store status message ID for reply handling
+                    if (sender === 'status@broadcast') {
+                        this.statusMessageIds.set(messageId, whatsappMsg.key);
+                    }
+                    logger.info('✅ TEXT MESSAGE PROCESSED SUCCESSFULLY');
+                    handled = true;
+                } catch (error) {
+                    logger.error('❌ FAILED TO PROCESS TEXT MESSAGE:', error);
+                }
+            }
+            
+            // If no handler processed the message, log it for debugging
+            if (!handled) {
+                logger.error('🚨 UNHANDLED MESSAGE TYPE - FULL DEBUG INFO:');
+                logger.error('Message Keys:', Object.keys(message));
+                logger.error('Has Text:', !!text);
+                logger.error('Text Content:', text);
+                logger.error('Full Message Object:', JSON.stringify(message, null, 2));
+            }
+            
+        } catch (error) {
+            logger.error('❌ CRITICAL ERROR in syncMessage:', error);
+            logger.error('Error Stack:', error.stack);
         }
-    } else {
-        logger.warn(`Unhandled message type: ${JSON.stringify(whatsappMsg.message)}`);
     }
-}
+
     async createUserMapping(participant, whatsappMsg) {
         if (this.userMappings.has(participant)) return;
 
@@ -394,72 +550,112 @@ async syncMessage(whatsappMsg, text) {
 
     async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
         try {
-            logger.info(`📥 Processing ${mediaType} from WhatsApp`);
+            logger.info(`🔥 STARTING MEDIA PROCESSING: ${mediaType}`);
             
             let mediaMessage;
             let fileName = `media_${Date.now()}`;
             let caption = this.extractText(whatsappMsg);
             
-            // Get the correct media message object
+            // Get the correct media message object with DETAILED LOGGING
             switch (mediaType) {
                 case 'image':
                     mediaMessage = whatsappMsg.message.imageMessage;
                     fileName += '.jpg';
+                    logger.info(`📸 Image message object:`, mediaMessage ? 'FOUND' : 'NOT FOUND');
                     break;
                 case 'video':
                     mediaMessage = whatsappMsg.message.videoMessage;
                     fileName += '.mp4';
+                    logger.info(`🎥 Video message object:`, mediaMessage ? 'FOUND' : 'NOT FOUND');
                     break;
                 case 'audio':
                     mediaMessage = whatsappMsg.message.audioMessage;
                     fileName += '.ogg';
+                    logger.info(`🎵 Audio message object:`, mediaMessage ? 'FOUND' : 'NOT FOUND');
                     break;
                 case 'document':
                     mediaMessage = whatsappMsg.message.documentMessage;
-                    fileName = mediaMessage.fileName || `document_${Date.now()}`;
+                    fileName = mediaMessage?.fileName || `document_${Date.now()}`;
+                    logger.info(`📄 Document message object:`, mediaMessage ? 'FOUND' : 'NOT FOUND');
                     break;
                 case 'sticker':
                     mediaMessage = whatsappMsg.message.stickerMessage;
                     fileName += '.webp';
+                    logger.info(`🎭 Sticker message object:`, mediaMessage ? 'FOUND' : 'NOT FOUND');
                     break;
             }
 
             if (!mediaMessage) {
-                logger.error(`❌ No ${mediaType} message found in WhatsApp message`);
-                logger.debug('Available message types:', Object.keys(whatsappMsg.message));
+                logger.error(`❌ CRITICAL: No ${mediaType} message found in WhatsApp message`);
+                logger.error('Available message types:', Object.keys(whatsappMsg.message));
+                logger.error('Full message structure:', JSON.stringify(whatsappMsg.message, null, 2));
                 return;
             }
 
-            logger.info(`📥 Downloading ${mediaType} from WhatsApp...`);
+            logger.info(`✅ Media message object found for ${mediaType}`);
+            logger.info(`📋 Media message details:`, {
+                url: mediaMessage.url,
+                mimetype: mediaMessage.mimetype,
+                fileLength: mediaMessage.fileLength,
+                fileName: mediaMessage.fileName
+            });
 
-            // Download media from WhatsApp - FIXED DOWNLOAD LOGIC
+            // ATTEMPT DOWNLOAD WITH COMPREHENSIVE ERROR HANDLING
+            logger.info(`🔥 ATTEMPTING DOWNLOAD for ${mediaType}...`);
+            
             let stream;
             try {
-                // Use the correct media type for download
-                const downloadType = mediaType === 'sticker' ? 'sticker' : 
-                                   mediaType === 'document' ? 'document' : mediaType;
+                // Try different download type variations
+                const downloadTypes = [mediaType, mediaType.toLowerCase()];
+                if (mediaType === 'sticker') downloadTypes.push('sticker');
+                if (mediaType === 'document') downloadTypes.push('document');
                 
-                stream = await downloadContentFromMessage(mediaMessage, downloadType);
-                logger.debug(`✅ Got download stream for ${mediaType}`);
+                let downloadError = null;
+                for (const downloadType of downloadTypes) {
+                    try {
+                        logger.info(`🔄 Trying download with type: ${downloadType}`);
+                        stream = await downloadContentFromMessage(mediaMessage, downloadType);
+                        logger.info(`✅ Download stream obtained with type: ${downloadType}`);
+                        break;
+                    } catch (err) {
+                        logger.warn(`⚠️ Download failed with type ${downloadType}:`, err.message);
+                        downloadError = err;
+                    }
+                }
+                
+                if (!stream) {
+                    throw downloadError || new Error('All download attempts failed');
+                }
+                
             } catch (downloadError) {
-                logger.error(`❌ Failed to get download stream for ${mediaType}:`, downloadError);
+                logger.error(`❌ DOWNLOAD FAILED for ${mediaType}:`, downloadError);
+                logger.error('Download error stack:', downloadError.stack);
                 return;
             }
 
+            logger.info(`✅ Download stream obtained for ${mediaType}`);
+
+            // CONVERT STREAM TO BUFFER WITH DETAILED LOGGING
+            logger.info(`🔄 Converting stream to buffer...`);
             const buffer = await this.streamToBuffer(stream);
             
             if (!buffer || buffer.length === 0) {
-                logger.error(`❌ Downloaded ${mediaType} buffer is empty`);
+                logger.error(`❌ CRITICAL: Downloaded ${mediaType} buffer is empty or null`);
+                logger.error('Buffer details:', { buffer: !!buffer, length: buffer?.length });
                 return;
             }
             
-            logger.info(`💾 Downloaded ${mediaType}: ${buffer.length} bytes`);
+            logger.info(`✅ Buffer created successfully: ${buffer.length} bytes`);
             
+            // SAVE TO TEMP FILE
             const filePath = path.join(this.tempDir, fileName);
+            logger.info(`💾 Saving to: ${filePath}`);
             await fs.writeFile(filePath, buffer);
+            logger.info(`✅ File saved successfully`);
 
-            // Send to Telegram based on media type
+            // SEND TO TELEGRAM WITH DETAILED LOGGING
             const chatId = config.get('telegram.chatId');
+            logger.info(`📤 Sending ${mediaType} to Telegram...`);
             
             try {
                 switch (mediaType) {
@@ -517,16 +713,20 @@ async syncMessage(whatsappMsg, text) {
                         break;
                 }
 
-                logger.info(`✅ Successfully sent ${mediaType} to Telegram`);
+                logger.info(`🎉 SUCCESSFULLY SENT ${mediaType.toUpperCase()} TO TELEGRAM!`);
             } catch (telegramError) {
-                logger.error(`❌ Failed to send ${mediaType} to Telegram:`, telegramError);
+                logger.error(`❌ TELEGRAM SEND FAILED for ${mediaType}:`, telegramError);
+                logger.error('Telegram error stack:', telegramError.stack);
             }
 
             // Clean up temp file
-            await fs.unlink(filePath).catch(() => {});
+            await fs.unlink(filePath).catch((err) => {
+                logger.debug('Could not delete temp file:', err.message);
+            });
             
         } catch (error) {
-            logger.error(`❌ Failed to handle WhatsApp ${mediaType}:`, error);
+            logger.error(`❌ CRITICAL ERROR in handleWhatsAppMedia for ${mediaType}:`, error);
+            logger.error('Error stack:', error.stack);
         }
     }
 
@@ -951,11 +1151,18 @@ async syncMessage(whatsappMsg, text) {
     }
 
     async streamToBuffer(stream) {
-        const chunks = [];
-        for await (const chunk of stream) {
-            chunks.push(chunk);
+        try {
+            const chunks = [];
+            for await (const chunk of stream) {
+                chunks.push(chunk);
+            }
+            const buffer = Buffer.concat(chunks);
+            logger.debug(`📊 Stream converted to buffer: ${buffer.length} bytes`);
+            return buffer;
+        } catch (error) {
+            logger.error('❌ Failed to convert stream to buffer:', error);
+            throw error;
         }
-        return Buffer.concat(chunks);
     }
 
     findWhatsAppJidByTopic(topicId) {
