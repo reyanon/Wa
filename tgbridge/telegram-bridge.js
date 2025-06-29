@@ -145,10 +145,12 @@ class TelegramBridge {
             const sender = whatsappMsg.key.remoteJid;
             const participant = whatsappMsg.key.participant || sender;
             
+            // Log the complete message structure for debugging
             logger.debug(`📨 Processing WhatsApp message from ${sender}`, {
-                messageType: Object.keys(whatsappMsg.message || {}),
+                messageKeys: Object.keys(whatsappMsg.message || {}),
                 hasText: !!text,
-                participant
+                participant,
+                fullMessage: JSON.stringify(whatsappMsg.message, null, 2)
             });
             
             // Create user mapping if not exists
@@ -168,30 +170,57 @@ class TelegramBridge {
                 return;
             }
 
-            // Check for media messages first
+            // Log all available message types for debugging
+            const messageTypes = Object.keys(message);
+            logger.debug(`📋 Available message types: ${messageTypes.join(', ')}`);
+
+            // Check for media messages first - use proper property checking
+            let handled = false;
+
             if (message.imageMessage) {
                 logger.info('📸 Processing image message');
                 await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
-            } else if (message.videoMessage) {
+                handled = true;
+            } 
+            
+            if (message.videoMessage) {
                 logger.info('🎥 Processing video message');
                 await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
-            } else if (message.audioMessage) {
+                handled = true;
+            } 
+            
+            if (message.audioMessage) {
                 logger.info('🎵 Processing audio message');
                 await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
-            } else if (message.documentMessage) {
+                handled = true;
+            } 
+            
+            if (message.documentMessage) {
                 logger.info('📄 Processing document message');
                 await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
-            } else if (message.stickerMessage) {
+                handled = true;
+            } 
+            
+            if (message.stickerMessage) {
                 logger.info('🎭 Processing sticker message');
                 await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
-            } else if (message.locationMessage) { 
+                handled = true;
+            } 
+            
+            if (message.locationMessage) { 
                 logger.info('📍 Processing location message');
                 await this.handleWhatsAppLocation(whatsappMsg, topicId);
-            } else if (message.contactMessage || message.contactsArrayMessage) { 
+                handled = true;
+            } 
+            
+            if (message.contactMessage || message.contactsArrayMessage) { 
                 logger.info('👤 Processing contact message');
                 await this.handleWhatsAppContact(whatsappMsg, topicId);
-            } else if (text) {
-                // Send text message
+                handled = true;
+            }
+            
+            // Handle text messages (including those with media captions)
+            if (text && text.trim()) {
                 logger.info('💬 Processing text message');
                 const messageId = await this.sendSimpleMessage(topicId, text, sender);
                 
@@ -199,9 +228,19 @@ class TelegramBridge {
                 if (sender === 'status@broadcast') {
                     this.statusMessageIds.set(messageId, whatsappMsg.key);
                 }
-            } else {
-                logger.debug('⚠️ Unknown message type:', Object.keys(message));
+                handled = true;
             }
+            
+            // If we haven't handled any message type, log it for debugging
+            if (!handled) {
+                logger.warn('⚠️ Unhandled message type:', {
+                    messageTypes,
+                    hasText: !!text,
+                    textContent: text,
+                    sender
+                });
+            }
+            
         } catch (error) {
             logger.error('❌ Error in syncMessage:', error);
         }
@@ -435,41 +474,58 @@ class TelegramBridge {
             let fileName = `media_${Date.now()}`;
             let caption = this.extractText(whatsappMsg);
             
+            // Get the correct media message object
+            const message = whatsappMsg.message;
+            
             switch (mediaType) {
                 case 'image':
-                    mediaMessage = whatsappMsg.message.imageMessage;
+                    mediaMessage = message.imageMessage;
                     fileName += '.jpg';
                     break;
                 case 'video':
-                    mediaMessage = whatsappMsg.message.videoMessage;
+                    mediaMessage = message.videoMessage;
                     fileName += '.mp4';
                     break;
                 case 'audio':
-                    mediaMessage = whatsappMsg.message.audioMessage;
+                    mediaMessage = message.audioMessage;
                     fileName += '.ogg';
                     break;
                 case 'document':
-                    mediaMessage = whatsappMsg.message.documentMessage;
+                    mediaMessage = message.documentMessage;
                     fileName = mediaMessage.fileName || `document_${Date.now()}`;
                     break;
                 case 'sticker':
-                    mediaMessage = whatsappMsg.message.stickerMessage;
+                    mediaMessage = message.stickerMessage;
                     fileName += '.webp';
                     break;
             }
 
             if (!mediaMessage) {
                 logger.error(`❌ No ${mediaType} message found in WhatsApp message`);
+                logger.debug('Available message types:', Object.keys(message));
                 return;
             }
 
             logger.info(`📥 Downloading ${mediaType} from WhatsApp...`);
+            logger.debug(`Media message details:`, {
+                mimetype: mediaMessage.mimetype,
+                fileLength: mediaMessage.fileLength,
+                fileName: mediaMessage.fileName
+            });
 
-            // Download media from WhatsApp
-            const stream = await downloadContentFromMessage(mediaMessage, mediaType === 'sticker' ? 'sticker' : mediaType);
+            // Download media from WhatsApp using the correct media type
+            let downloadType = mediaType;
+            if (mediaType === 'sticker') downloadType = 'sticker';
+            
+            const stream = await downloadContentFromMessage(mediaMessage, downloadType);
             const buffer = await this.streamToBuffer(stream);
             
             logger.info(`💾 Downloaded ${mediaType}: ${buffer.length} bytes`);
+            
+            if (buffer.length === 0) {
+                logger.error(`❌ Downloaded ${mediaType} is empty`);
+                return;
+            }
             
             const filePath = path.join(this.tempDir, fileName);
             await fs.writeFile(filePath, buffer);
@@ -539,6 +595,10 @@ class TelegramBridge {
             
         } catch (error) {
             logger.error(`❌ Failed to handle WhatsApp ${mediaType}:`, error);
+            logger.debug('Error details:', {
+                stack: error.stack,
+                message: error.message
+            });
         }
     }
 
