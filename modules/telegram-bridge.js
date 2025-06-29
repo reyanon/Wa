@@ -487,34 +487,8 @@ class TelegramBridge {
         }
     }
 
-    async handleWhatsAppLocation(whatsappMsg, topicId) {
-        try {
-            const locationMessage = whatsappMsg.message.locationMessage;
-            await this.telegramBot.sendLocation(config.get('telegram.chatId'), 
-                locationMessage.degreesLatitude, 
-                locationMessage.degreesLongitude, {
-                    message_thread_id: topicId
-                });
-        } catch (error) {
-            logger.error('❌ Failed to handle WhatsApp location message:', error);
-        }
-    }
 
-    async handleWhatsAppContact(whatsappMsg, topicId) {
-        try {
-            const contactMessage = whatsappMsg.message.contactMessage;
-            const vcard = contactMessage.vcard;
-            const displayName = contactMessage.displayName || 'Unknown Contact';
 
-            await this.telegramBot.sendDocument(config.get('telegram.chatId'), Buffer.from(vcard), {
-                message_thread_id: topicId,
-                caption: `📇 Contact: ${displayName}`,
-                filename: `${displayName}.vcf`
-            });
-        } catch (error) {
-            logger.error('❌ Failed to handle WhatsApp contact message:', error);
-        }
-    }
 
 async handleTelegramMessage(msg) {
     // Ignore media or non-text messages
@@ -733,60 +707,6 @@ async handleTelegramMessage(msg) {
         }
     }
 
-    async handleTelegramLocation(msg) {
-        try {
-            const topicId = msg.message_thread_id;
-            const whatsappJid = this.findWhatsAppJidByTopic(topicId);
-
-            if (!whatsappJid) {
-                logger.warn('⚠️ Could not find WhatsApp chat for Telegram location');
-                return;
-            }
-
-            await this.whatsappBot.sendMessage(whatsappJid, { 
-                location: { 
-                    degreesLatitude: msg.location.latitude, 
-                    degreesLongitude: msg.location.longitude
-                } 
-            });
-
-            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👍' }]);
-        } catch (error) {
-            logger.error('❌ Failed to handle Telegram location message:', error);
-            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }]);
-        }
-    }
-
-    async handleTelegramContact(msg) {
-        try {
-            const topicId = msg.message_thread_id;
-            const whatsappJid = this.findWhatsAppJidByTopic(topicId);
-
-            if (!whatsappJid) {
-                logger.warn('⚠️ Could not find WhatsApp chat for Telegram contact');
-                return;
-            }
-
-            const firstName = msg.contact.first_name || '';
-            const lastName = msg.contact.last_name || '';
-            const phoneNumber = msg.contact.phone_number || '';
-            const displayName = `${firstName} ${lastName}`.trim() || phoneNumber;
-
-            const vcard = `BEGIN:VCARD\nVERSION:3.0\nN:${lastName};${firstName};;;\nFN:${displayName}\nTEL;TYPE=CELL:${phoneNumber}\nEND:VCARD`;
-
-            await this.whatsappBot.sendMessage(whatsappJid, { 
-                contacts: { 
-                    displayName: displayName, 
-                    contacts: [{ vcard: vcard }]
-                } 
-            });
-
-            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👍' }]);
-        } catch (error) {
-            logger.error('❌ Failed to handle Telegram contact message:', error);
-            await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }]);
-        }
-    }
 
     async convertVideoNote(inputPath, outputPath) {
         return new Promise((resolve, reject) => {
