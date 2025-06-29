@@ -704,15 +704,21 @@ async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
                     };
                     break;
                     
-                case 'video':
-                case 'video_note':
-                    messageOptions = {
-                        video: fs.readFileSync(filePath),
-                        caption: caption,
-                        ptv: mediaType === 'video_note', // Push-to-talk video for video notes
-                        viewOnce: hasMediaSpoiler // Send as view once if spoiler
-                    };
-                    break;
+case 'video':
+case 'video_note':
+    // Check if it's actually a GIF/animation
+    const isGif = msg.animation || 
+                  (msg.video && msg.video.mime_type === 'video/mp4' && msg.video.duration < 60);
+    
+    messageOptions = {
+        video: fs.readFileSync(filePath),
+        caption: caption,
+        gifPlayback: isGif, // This tells WhatsApp it's a GIF
+        ptv: mediaType === 'video_note',
+        viewOnce: hasMediaSpoiler
+    };
+    break;
+
                     
                 case 'voice':
                     messageOptions = {
