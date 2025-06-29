@@ -213,7 +213,7 @@ class AdvancedWhatsAppBot {
         }
         
         if (this.sock) {
-            await this.sock.end();
+            await this.sock.logout();
         }
         
         logger.info('✅ Bot shutdown complete');
