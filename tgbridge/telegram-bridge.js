@@ -138,80 +138,111 @@ class TelegramBridge {
         }
     }
 
-async function syncMessage(whatsappMsg, text) {
-    if (!this.telegramBot || !config.get('telegram.enabled')) return;
+    async syncMessage(whatsappMsg, text) {
+        if (!this.telegramBot || !config.get('telegram.enabled')) return;
 
-    try {
-        const sender = whatsappMsg.key.remoteJid;
-        const participant = whatsappMsg.key.participant || sender;
-        
-        // Debug logging to track message processing
-        console.log('Processing message:', {
-            sender,
-            participant,
-            messageKeys: Object.keys(whatsappMsg.message || {}),
-            hasMedia: !!detectMediaType(whatsappMsg)
-        });
-        
-        // Create user mapping if not exists
-        await this.createUserMapping(participant, whatsappMsg);
-        
-        // Get or create topic for this chat
-        const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
-        
-        if (!topicId) {
-            console.error('Failed to get topic ID for message');
-            return;
-        }
-        
-        // Detect media type
-        const mediaType = detectMediaType(whatsappMsg);
-        
-        if (mediaType) {
-            console.log(`Detected media type: ${mediaType}`);
+        try {
+            const sender = whatsappMsg.key.remoteJid;
+            const participant = whatsappMsg.key.participant || sender;
             
-            switch (mediaType) {
-                case 'image':
-                    await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
-                    break;
-                case 'video':
-                    await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
-                    break;
-                case 'audio':
-                    await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
-                    break;
-                case 'document':
-                    await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
-                    break;
-                case 'sticker':
-                    await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
-                    break;
-                case 'location':
-                    await this.handleWhatsAppLocation(whatsappMsg, topicId);
-                    break;
-                case 'contact':
-                    await this.handleWhatsAppContact(whatsappMsg, topicId);
-                    break;
-                default:
-                    console.log(`Unhandled media type: ${mediaType}`);
-            }
-        } else if (text) {
-            // Send text message
-            const messageId = await this.sendSimpleMessage(topicId, text, sender);
+            logger.info(`📨 Processing WhatsApp message from ${sender}`, {
+                messageKeys: Object.keys(whatsappMsg.message || {}),
+                hasText: !!text,
+                participant,
+                messageId: whatsappMsg.key.id
+            });
             
-            // Store status message ID for reply handling
-            if (sender === 'status@broadcast') {
-                this.statusMessageIds.set(messageId, whatsappMsg.key);
+            // Create user mapping if not exists
+            await this.createUserMapping(participant, whatsappMsg);
+            
+            // Get or create topic for this chat
+            const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
+            if (!topicId) {
+                logger.error('❌ Could not get or create topic for message');
+                return;
             }
-        } else {
-            console.log('No media or text detected in message');
+            
+            // Handle different message types - check the actual message structure
+            const message = whatsappMsg.message;
+            if (!message) {
+                logger.debug('⚠️ No message content found');
+                return;
+            }
+
+            // Log all available message types for debugging
+            const messageTypes = Object.keys(message);
+            logger.debug(`📋 Available message types: ${messageTypes.join(', ')}`);
+
+            // Check for media messages first - FIXED DETECTION LOGIC
+            let handled = false;
+
+            if (message.imageMessage) {
+                logger.info('📸 Processing image message');
+                await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
+                handled = true;
+            } 
+            
+            if (message.videoMessage) {
+                logger.info('🎥 Processing video message');
+                await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
+                handled = true;
+            } 
+            
+            if (message.audioMessage) {
+                logger.info('🎵 Processing audio message');
+                await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
+                handled = true;
+            } 
+            
+            if (message.documentMessage) {
+                logger.info('📄 Processing document message');
+                await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
+                handled = true;
+            } 
+            
+            if (message.stickerMessage) {
+                logger.info('🎭 Processing sticker message');
+                await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
+                handled = true;
+            } 
+            
+            if (message.locationMessage) { 
+                logger.info('📍 Processing location message');
+                await this.handleWhatsAppLocation(whatsappMsg, topicId);
+                handled = true;
+            } 
+            
+            if (message.contactMessage || message.contactsArrayMessage) { 
+                logger.info('👤 Processing contact message');
+                await this.handleWhatsAppContact(whatsappMsg, topicId);
+                handled = true;
+            }
+            
+            // Handle text messages (including captions)
+            if (text && text.trim()) {
+                logger.info('💬 Processing text message');
+                const messageId = await this.sendSimpleMessage(topicId, text, sender);
+                
+                // Store status message ID for reply handling
+                if (sender === 'status@broadcast') {
+                    this.statusMessageIds.set(messageId, whatsappMsg.key);
+                }
+                handled = true;
+            }
+            
+            // If no handler processed the message, log it for debugging
+            if (!handled) {
+                logger.warn('⚠️ Unhandled message type:', {
+                    messageTypes,
+                    hasText: !!text,
+                    messageStructure: JSON.stringify(message, null, 2).substring(0, 500)
+                });
+            }
+            
+        } catch (error) {
+            logger.error('❌ Error in syncMessage:', error);
         }
-        
-    } catch (error) {
-        console.error('Error in syncMessage:', error);
-        console.log('Message structure:', JSON.stringify(whatsappMsg, null, 2));
     }
-}
 
     async createUserMapping(participant, whatsappMsg) {
         if (this.userMappings.has(participant)) return;
@@ -433,188 +464,143 @@ async function syncMessage(whatsappMsg, text) {
         }
     }
 
-async function handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
-    try {
-        console.log(`📥 Processing ${mediaType} from WhatsApp`);
-        
-        let mediaMessage;
-        let fileName = `media_${Date.now()}`;
-        let caption = this.extractText(whatsappMsg);
-        
-        // Get the media message object
-        switch (mediaType) {
-            case 'image':
-                mediaMessage = whatsappMsg.message.imageMessage;
-                fileName += '.jpg';
-                break;
-            case 'video':
-                mediaMessage = whatsappMsg.message.videoMessage;
-                fileName += '.mp4';
-                break;
-            case 'audio':
-                mediaMessage = whatsappMsg.message.audioMessage;
-                fileName += '.ogg';
-                break;
-            case 'document':
-                mediaMessage = whatsappMsg.message.documentMessage;
-                fileName = mediaMessage.fileName || `document_${Date.now()}`;
-                break;
-            case 'sticker':
-                mediaMessage = whatsappMsg.message.stickerMessage;
-                fileName += '.webp';
-                break;
-        }
-
-        if (!mediaMessage) {
-            console.error(`❌ No media message found for ${mediaType}`);
-            console.log('Available message keys:', Object.keys(whatsappMsg.message));
-            return;
-        }
-
-        // Validate media message has required properties
-        if (!mediaMessage.url && !mediaMessage.directPath) {
-            console.error(`❌ Media message missing URL/directPath for ${mediaType}`);
-            console.log('Media message properties:', Object.keys(mediaMessage));
-            return;
-        }
-
-        console.log(`📥 Downloading ${mediaType} from WhatsApp: ${fileName}`);
-        console.log('Media message info:', {
-            mimetype: mediaMessage.mimetype,
-            fileLength: mediaMessage.fileLength,
-            hasUrl: !!mediaMessage.url,
-            hasDirectPath: !!mediaMessage.directPath
-        });
-
-        // Download media from WhatsApp with better error handling
-        let stream;
+    async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
         try {
-            stream = await downloadContentFromMessage(mediaMessage, mediaType === 'sticker' ? 'sticker' : mediaType);
-        } catch (downloadError) {
-            console.error(`❌ Failed to get download stream for ${mediaType}:`, downloadError);
+            logger.info(`📥 Processing ${mediaType} from WhatsApp`);
             
-            // Try alternative download method if available
-            if (mediaMessage.url) {
-                try {
-                    const response = await axios.get(mediaMessage.url, { responseType: 'stream' });
-                    stream = response.data;
-                } catch (urlError) {
-                    console.error(`❌ Failed to download via URL:`, urlError);
-                    return;
-                }
-            } else {
-                return;
-            }
-        }
-        
-        if (!stream) {
-            console.error(`❌ Failed to get stream for ${mediaType}`);
-            return;
-        }
-        
-        // Convert stream to buffer with timeout
-        const buffer = await this.streamToBuffer(stream);
-        
-        if (!buffer || buffer.length === 0) {
-            console.error(`❌ Empty buffer for ${mediaType}`);
-            return;
-        }
-        
-        console.log(`💾 Downloaded ${mediaType}: ${buffer.length} bytes`);
-        
-        // Save to temp file
-        const filePath = path.join(this.tempDir, fileName);
-        await fs.writeFile(filePath, buffer);
-
-        console.log(`💾 Saved ${mediaType} to: ${filePath}`);
-
-        // Send to Telegram based on media type
-        const chatId = config.get('telegram.chatId');
-        
-        try {
+            let mediaMessage;
+            let fileName = `media_${Date.now()}`;
+            let caption = this.extractText(whatsappMsg);
+            
+            // Get the correct media message object
             switch (mediaType) {
                 case 'image':
-                    await this.telegramBot.sendPhoto(chatId, filePath, {
-                        message_thread_id: topicId,
-                        caption: caption
-                    });
+                    mediaMessage = whatsappMsg.message.imageMessage;
+                    fileName += '.jpg';
                     break;
-                    
                 case 'video':
-                    // Check if it's a GIF
-                    if (mediaMessage.gifPlayback) {
-                        await this.telegramBot.sendAnimation(chatId, filePath, {
+                    mediaMessage = whatsappMsg.message.videoMessage;
+                    fileName += '.mp4';
+                    break;
+                case 'audio':
+                    mediaMessage = whatsappMsg.message.audioMessage;
+                    fileName += '.ogg';
+                    break;
+                case 'document':
+                    mediaMessage = whatsappMsg.message.documentMessage;
+                    fileName = mediaMessage.fileName || `document_${Date.now()}`;
+                    break;
+                case 'sticker':
+                    mediaMessage = whatsappMsg.message.stickerMessage;
+                    fileName += '.webp';
+                    break;
+            }
+
+            if (!mediaMessage) {
+                logger.error(`❌ No ${mediaType} message found in WhatsApp message`);
+                logger.debug('Available message types:', Object.keys(whatsappMsg.message));
+                return;
+            }
+
+            logger.info(`📥 Downloading ${mediaType} from WhatsApp...`);
+
+            // Download media from WhatsApp - FIXED DOWNLOAD LOGIC
+            let stream;
+            try {
+                // Use the correct media type for download
+                const downloadType = mediaType === 'sticker' ? 'sticker' : 
+                                   mediaType === 'document' ? 'document' : mediaType;
+                
+                stream = await downloadContentFromMessage(mediaMessage, downloadType);
+                logger.debug(`✅ Got download stream for ${mediaType}`);
+            } catch (downloadError) {
+                logger.error(`❌ Failed to get download stream for ${mediaType}:`, downloadError);
+                return;
+            }
+
+            const buffer = await this.streamToBuffer(stream);
+            
+            if (!buffer || buffer.length === 0) {
+                logger.error(`❌ Downloaded ${mediaType} buffer is empty`);
+                return;
+            }
+            
+            logger.info(`💾 Downloaded ${mediaType}: ${buffer.length} bytes`);
+            
+            const filePath = path.join(this.tempDir, fileName);
+            await fs.writeFile(filePath, buffer);
+
+            // Send to Telegram based on media type
+            const chatId = config.get('telegram.chatId');
+            
+            try {
+                switch (mediaType) {
+                    case 'image':
+                        await this.telegramBot.sendPhoto(chatId, filePath, {
                             message_thread_id: topicId,
                             caption: caption
                         });
-                    } else {
+                        break;
+                        
+                    case 'video':
                         await this.telegramBot.sendVideo(chatId, filePath, {
                             message_thread_id: topicId,
                             caption: caption
                         });
-                    }
-                    break;
-                    
-                case 'audio':
-                    if (mediaMessage.ptt) {
-                        await this.telegramBot.sendVoice(chatId, filePath, {
+                        break;
+                        
+                    case 'audio':
+                        if (mediaMessage.ptt) {
+                            await this.telegramBot.sendVoice(chatId, filePath, {
+                                message_thread_id: topicId,
+                                caption: caption
+                            });
+                        } else {
+                            await this.telegramBot.sendAudio(chatId, filePath, {
+                                message_thread_id: topicId,
+                                caption: caption
+                            });
+                        }
+                        break;
+                        
+                    case 'document':
+                        await this.telegramBot.sendDocument(chatId, filePath, {
                             message_thread_id: topicId,
                             caption: caption
                         });
-                    } else {
-                        await this.telegramBot.sendAudio(chatId, filePath, {
-                            message_thread_id: topicId,
-                            caption: caption,
-                            title: mediaMessage.title || 'Audio'
-                        });
-                    }
-                    break;
-                    
-                case 'document':
-                    await this.telegramBot.sendDocument(chatId, filePath, {
-                        message_thread_id: topicId,
-                        caption: caption
-                    });
-                    break;
-                    
-                case 'sticker':
-                    try {
-                        await this.telegramBot.sendSticker(chatId, filePath, {
-                            message_thread_id: topicId
-                        });
-                    } catch (stickerError) {
-                        console.log('Failed to send as sticker, converting to PNG:', stickerError);
-                        const pngPath = filePath.replace('.webp', '.png');
-                        await sharp(filePath).png().toFile(pngPath);
+                        break;
                         
-                        await this.telegramBot.sendPhoto(chatId, pngPath, {
-                            message_thread_id: topicId,
-                            caption: caption || 'Sticker'
-                        });
-                        await fs.unlink(pngPath).catch(() => {});
-                    }
-                    break;
+                    case 'sticker':
+                        try {
+                            await this.telegramBot.sendSticker(chatId, filePath, {
+                                message_thread_id: topicId
+                            });
+                        } catch (stickerError) {
+                            logger.debug('Failed to send as sticker, converting to PNG:', stickerError.message);
+                            const pngPath = filePath.replace('.webp', '.png');
+                            await sharp(filePath).png().toFile(pngPath);
+                            
+                            await this.telegramBot.sendPhoto(chatId, pngPath, {
+                                message_thread_id: topicId,
+                                caption: caption || 'Sticker'
+                            });
+                            await fs.unlink(pngPath).catch(() => {});
+                        }
+                        break;
+                }
+
+                logger.info(`✅ Successfully sent ${mediaType} to Telegram`);
+            } catch (telegramError) {
+                logger.error(`❌ Failed to send ${mediaType} to Telegram:`, telegramError);
             }
 
-            console.log(`✅ Successfully sent ${mediaType} to Telegram`);
-        } catch (telegramError) {
-            console.error(`❌ Failed to send ${mediaType} to Telegram:`, telegramError);
+            // Clean up temp file
+            await fs.unlink(filePath).catch(() => {});
+            
+        } catch (error) {
+            logger.error(`❌ Failed to handle WhatsApp ${mediaType}:`, error);
         }
-
-        // Clean up temp file
-        await fs.unlink(filePath).catch(() => {});
-        
-    } catch (error) {
-        console.error(`❌ Failed to handle WhatsApp ${mediaType}:`, error);
-        console.log('Full error details:', {
-            message: error.message,
-            stack: error.stack,
-            mediaType,
-            messageStructure: whatsappMsg.message ? Object.keys(whatsappMsg.message) : 'no message'
-        });
     }
-}
-
 
     async handleWhatsAppLocation(whatsappMsg, topicId) {
         try {
