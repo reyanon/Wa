@@ -7,6 +7,7 @@ const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
 const TelegramBridge = require('../tgbridge/telegram-bridge');
+const WhatsAppMessageSyncDetector = require('../tgbridge/message-sync');
 
 class AdvancedWhatsAppBot {
     constructor() {
@@ -32,7 +33,7 @@ class AdvancedWhatsAppBot {
 
         // Start WhatsApp connection
         await this.startWhatsApp();
-        
+        this.messageHandler = new MessageHandler(this);
         logger.info('✅ Bot initialized successfully!');
     }
 
