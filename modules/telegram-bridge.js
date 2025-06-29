@@ -41,7 +41,18 @@ class TelegramBridge {
             logger.error('❌ Failed to initialize Telegram bridge:', error);
         }
     }
-
+  async setReaction(chatId, messageId, emoji) {
+    try {
+      const token = config.get('telegram.botToken');
+      await axios.post(`https://api.telegram.org/bot${token}/setMessageReaction`, {
+        chat_id: chatId,
+        message_id: messageId,
+        reaction: [{ type: 'emoji', emoji }]
+      });
+    } catch (err) {
+      logger.debug('❌ Failed to set reaction via HTTP API:', err?.response?.data?.description || err.message);
+    }
+  }
     async setupTelegramHandlers() {
         // Handle all types of messages
         this.telegramBot.on('message', async (msg) => {
@@ -495,48 +506,36 @@ class TelegramBridge {
         }
     }
 
-    async handleTelegramMessage(msg) {
-        // Skip if message has media (handled by specific media handlers)
-        if (msg.photo || msg.video || msg.video_note || msg.voice || msg.audio || msg.document || msg.sticker || msg.location || msg.contact) {
-            return;
-        }
+  async handleTelegramMessage(msg) {
+    if (
+      !msg.text ||
+      msg.photo || msg.video || msg.video_note ||
+      msg.voice || msg.audio || msg.document ||
+      msg.sticker || msg.location || msg.contact
+    ) return;
 
-        if (!msg.text) return;
-        
-        try {
-            const topicId = msg.message_thread_id;
-            const whatsappJid = this.findWhatsAppJidByTopic(topicId);
-            
-            if (!whatsappJid) {
-                logger.warn('⚠️ Could not find WhatsApp chat for Telegram message');
-                return;
-            }
+    try {
+      const topicId = msg.message_thread_id;
+      const whatsappJid = this.findWhatsAppJidByTopic(topicId);
+      if (!whatsappJid) {
+        logger.warn('⚠️ Could not find WhatsApp chat for Telegram message');
+        return;
+      }
 
-            // Handle status reply
-            if (whatsappJid === 'status@broadcast' && msg.reply_to_message) {
-                await this.handleStatusReply(msg);
-                return;
-            }
+      if (whatsappJid === 'status@broadcast' && msg.reply_to_message) {
+        await this.handleStatusReply(msg);
+        return;
+      }
 
-            // Send to WhatsApp
-            await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
-            
-            // React with thumbs up when message is delivered to WhatsApp
-            try {
-                await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '👍' }]);
-            } catch (reactionError) {
-                logger.debug('Could not set delivery reaction:', reactionError);
-            }
-
-        } catch (error) {
-            logger.error('❌ Failed to handle Telegram message:', error);
-            try {
-                await this.telegramBot.setMessageReaction(msg.chat.id, msg.message_id, [{ type: 'emoji', emoji: '❌' }]);
-            } catch (reactionError) {
-                logger.debug('Could not set error reaction:', reactionError);
-            }
-        }
+      const sendResult = await this.whatsappBot.sendMessage(whatsappJid, { text: msg.text });
+      if (sendResult?.key?.id) {
+        await this.setReaction(msg.chat.id, msg.message_id, '👍');
+      }
+    } catch (error) {
+      logger.error('❌ Failed to handle Telegram message:', error);
+      await this.setReaction(msg.chat.id, msg.message_id, '❌');
     }
+  }
 
     async handleStatusReply(msg) {
         try {
