@@ -24,7 +24,8 @@ class TelegramBridge {
         };
         this.messageQueue = [];
         this.isProcessingQueue = false;
-        this.callTracker = new Set(); // Track processed calls
+        this.callTracker = new Map(); // Track processed calls with timestamps
+        this.threadToUserMap = new Map(); // Map thread IDs to user JIDs
     }
 
     async initialize() {
@@ -72,6 +73,11 @@ class TelegramBridge {
         // Handle errors
         this.bot.on('error', (error) => {
             logger.error('Telegram bot error:', error);
+        });
+
+        // Handle polling errors
+        this.bot.on('polling_error', (error) => {
+            logger.error('Telegram polling error:', error);
         });
     }
 
@@ -151,6 +157,18 @@ class TelegramBridge {
             // Create topic
             const topic = await this.bot.createForumTopic(this.groupId, topicName);
             
+            userTopic = {
+                id: topic.message_thread_id,
+                name: topicName,
+                jid: jid,
+                userId: userId
+            };
+
+            // Store mappings
+            this.topicCache.set(cacheKey, userTopic);
+            this.topics.users.set(userId, userTopic);
+            this.threadToUserMap.set(topic.message_thread_id, jid);
+
             // Create user info message
             const userInfoMsg = await this.createUserInfoMessage(userInfo);
             const infoMsg = await this.bot.sendMessage(this.groupId, userInfoMsg, {
@@ -159,20 +177,14 @@ class TelegramBridge {
             });
             
             // Pin user info
-            await this.bot.pinChatMessage(this.groupId, infoMsg.message_id);
+            try {
+                await this.bot.pinChatMessage(this.groupId, infoMsg.message_id);
+            } catch (pinError) {
+                logger.warn('Could not pin message:', pinError.message);
+            }
 
             // Send profile picture if available
             await this.sendProfilePicture(jid, topic.message_thread_id);
-
-            userTopic = {
-                id: topic.message_thread_id,
-                name: topicName,
-                jid: jid,
-                userId: userId
-            };
-
-            this.topicCache.set(cacheKey, userTopic);
-            this.topics.users.set(userId, userTopic);
 
             logger.info(`✅ Created topic for user: ${userInfo.name} (${userId})`);
             return userTopic;
@@ -211,6 +223,7 @@ class TelegramBridge {
 
     async getProfilePictureUrl(jid) {
         try {
+            if (!this.whatsappBot.sock) return null;
             const profilePic = await this.whatsappBot.sock.profilePictureUrl(jid, 'image');
             return profilePic;
         } catch (error) {
@@ -231,11 +244,15 @@ class TelegramBridge {
             if (!profilePicUrl) return;
 
             // Download and send profile picture
-            const response = await axios.get(profilePicUrl, { responseType: 'arraybuffer' });
+            const response = await axios.get(profilePicUrl, { 
+                responseType: 'arraybuffer',
+                timeout: 10000
+            });
             const buffer = Buffer.from(response.data);
 
             await this.bot.sendPhoto(this.groupId, buffer, {
-                message_thread_id: threadId
+                message_thread_id: threadId,
+                caption: 'Profile Picture'
             });
         } catch (error) {
             logger.error(`Failed to send profile picture for ${jid}:`, error);
@@ -262,27 +279,38 @@ class TelegramBridge {
             const userTopic = await this.getUserTopic(userJid, pushName, notify);
             if (!userTopic) return;
 
+            // Format message with sender info if needed
+            let messageText = text;
+            if (isFromMe) {
+                messageText = `📤 **You:** ${text || ''}`;
+            } else {
+                messageText = `📥 **${pushName || userJid.split('@')[0]}:** ${text || ''}`;
+            }
+
             // Send text message if exists
-            if (text && text.trim()) {
-                await this.bot.sendMessage(this.groupId, text, {
-                    message_thread_id: userTopic.id
+            if (messageText && messageText.trim()) {
+                await this.bot.sendMessage(this.groupId, messageText, {
+                    message_thread_id: userTopic.id,
+                    parse_mode: 'Markdown'
                 });
             }
 
             // Handle media
-            await this.handleWhatsAppMedia(whatsappMsg, userTopic.id);
+            await this.handleWhatsAppMedia(whatsappMsg, userTopic.id, isFromMe);
 
         } catch (error) {
             logger.error('Error syncing message to Telegram:', error);
         }
     }
 
-    async handleWhatsAppMedia(msg, threadId) {
+    async handleWhatsAppMedia(msg, threadId, isFromMe = false) {
         try {
             let mediaBuffer = null;
             let fileName = null;
             let caption = null;
             let mediaType = null;
+
+            const senderPrefix = isFromMe ? '📤 **You:** ' : '📥 ';
 
             if (msg.message?.imageMessage) {
                 mediaBuffer = await this.whatsappBot.sock.downloadMediaMessage(msg);
@@ -309,7 +337,8 @@ class TelegramBridge {
             }
 
             if (mediaBuffer && mediaType) {
-                await this.sendMediaToTelegram(threadId, mediaBuffer, fileName, caption, mediaType);
+                const finalCaption = caption ? `${senderPrefix}${caption}` : senderPrefix.trim();
+                await this.sendMediaToTelegram(threadId, mediaBuffer, fileName, finalCaption, mediaType);
             }
         } catch (error) {
             logger.error('Error handling WhatsApp media:', error);
@@ -364,14 +393,26 @@ class TelegramBridge {
             // Skip bot messages
             if (msg.from.is_bot) return;
 
-            // Find corresponding WhatsApp user
-            const userTopic = this.findUserTopicByThreadId(msg.message_thread_id);
-            if (userTopic) {
+            logger.info(`📨 Telegram message received in thread: ${msg.message_thread_id}`);
+
+            // Find corresponding WhatsApp user using thread mapping
+            const userJid = this.threadToUserMap.get(msg.message_thread_id);
+            
+            if (userJid) {
+                logger.info(`🔄 Forwarding to WhatsApp user: ${userJid}`);
                 // Send to WhatsApp
-                await this.sendToWhatsApp(userTopic.jid, msg);
+                await this.sendToWhatsApp(userJid, msg);
             } else if (msg.message_thread_id === this.topics.statusUpdates?.id) {
                 // Handle status reply
                 await this.handleStatusReply(msg);
+            } else {
+                logger.warn(`❓ No user found for thread ID: ${msg.message_thread_id}`);
+                // Try to find user topic by searching through topics
+                const userTopic = this.findUserTopicByThreadId(msg.message_thread_id);
+                if (userTopic) {
+                    logger.info(`🔄 Found user topic, forwarding to: ${userTopic.jid}`);
+                    await this.sendToWhatsApp(userTopic.jid, msg);
+                }
             }
 
         } catch (error) {
@@ -424,8 +465,19 @@ class TelegramBridge {
             }
 
             if (Object.keys(content).length > 0) {
+                // Ensure WhatsApp is connected before sending
+                if (!this.whatsappBot.sock || !this.whatsappBot.sock.user) {
+                    throw new Error('WhatsApp not connected');
+                }
+
                 await this.whatsappBot.sendMessage(jid, content);
                 logger.info(`✅ Message sent to WhatsApp: ${jid}`);
+                
+                // Send confirmation to Telegram
+                await this.bot.sendMessage(this.groupId, 
+                    '✅ Message sent successfully', {
+                    message_thread_id: telegramMsg.message_thread_id
+                });
             }
 
         } catch (error) {
@@ -444,7 +496,10 @@ class TelegramBridge {
             const fileInfo = await this.bot.getFile(fileId);
             const fileUrl = `https://api.telegram.org/file/bot${this.bot.token}/${fileInfo.file_path}`;
             
-            const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+            const response = await axios.get(fileUrl, { 
+                responseType: 'arraybuffer',
+                timeout: 30000
+            });
             return Buffer.from(response.data);
         } catch (error) {
             logger.error('Error downloading Telegram file:', error);
@@ -456,21 +511,29 @@ class TelegramBridge {
         try {
             if (!this.topics.callLogs) return;
 
-            // Create unique call ID to prevent duplicates
-            const callId = `${call.from}_${call.id}_${Date.now()}`;
-            if (this.callTracker.has(callId)) return;
+            const caller = call.from.split('@')[0];
+            const callId = `${caller}_${call.id}`;
+            const now = Date.now();
             
-            this.callTracker.add(callId);
+            // Check if we already processed this call recently (within 5 seconds)
+            const lastProcessed = this.callTracker.get(callId);
+            if (lastProcessed && (now - lastProcessed) < 5000) {
+                return; // Skip duplicate
+            }
             
-            // Clean up old call IDs (keep only last 100)
-            if (this.callTracker.size > 100) {
-                const oldIds = Array.from(this.callTracker).slice(0, 50);
-                oldIds.forEach(id => this.callTracker.delete(id));
+            this.callTracker.set(callId, now);
+            
+            // Clean up old call tracking entries (older than 1 hour)
+            for (const [id, timestamp] of this.callTracker.entries()) {
+                if (now - timestamp > 3600000) { // 1 hour
+                    this.callTracker.delete(id);
+                }
             }
 
             const callInfo = this.formatCallInfo(call);
             await this.bot.sendMessage(this.groupId, callInfo, {
-                message_thread_id: this.topics.callLogs.id
+                message_thread_id: this.topics.callLogs.id,
+                parse_mode: 'Markdown'
             });
 
             logger.info(`📞 Call logged: ${call.from} - ${call.status}`);
@@ -482,12 +545,29 @@ class TelegramBridge {
     formatCallInfo(call) {
         const caller = call.from.split('@')[0];
         const callType = call.isVideo ? '📹' : '📞';
-        const status = call.status === 'offer' ? 'Incoming call' : 
-                      call.status === 'accept' ? 'Call accepted' : 
-                      call.status === 'reject' ? 'Call rejected' : 
-                      call.status === 'timeout' ? 'Missed call' : call.status;
+        const timestamp = new Date().toLocaleString();
+        
+        let status;
+        switch (call.status) {
+            case 'offer':
+                status = '📞 **Incoming Call**';
+                break;
+            case 'accept':
+                status = '✅ **Call Accepted**';
+                break;
+            case 'reject':
+                status = '❌ **Call Rejected**';
+                break;
+            case 'timeout':
+                status = '⏰ **Missed Call**';
+                break;
+            default:
+                status = `📞 **${call.status}**`;
+        }
 
-        return `${callType} ${status} from +${caller}`;
+        return `${callType} ${status}\n` +
+               `👤 **From:** +${caller}\n` +
+               `🕐 **Time:** ${timestamp}`;
     }
 
     async handleWhatsAppStatus(msg) {
@@ -500,13 +580,14 @@ class TelegramBridge {
                         msg.message?.imageMessage?.caption ||
                         msg.message?.videoMessage?.caption || '';
 
-            let statusText = `📱 Status from +${sender}`;
+            let statusText = `📱 **Status from +${sender}**`;
             if (text) {
                 statusText += `\n\n${text}`;
             }
 
             const sentMsg = await this.bot.sendMessage(this.groupId, statusText, {
-                message_thread_id: this.topics.statusUpdates.id
+                message_thread_id: this.topics.statusUpdates.id,
+                parse_mode: 'Markdown'
             });
 
             // Store status message mapping for replies
