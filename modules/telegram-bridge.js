@@ -396,77 +396,44 @@ class TelegramBridge {
         return null;
     }
 
-    async sendToWhatsApp(jid, telegramMsg) {
-        try {
-            let content = {};
-
-            if (telegramMsg.text) {
-                content = { text: telegramMsg.text };
-            } else if (telegramMsg.photo) {
-                const photo = telegramMsg.photo[telegramMsg.photo.length - 1];
-                const fileBuffer = await this.downloadTelegramFile(photo.file_id);
-                content = {
-                    image: fileBuffer,
-                    caption: telegramMsg.caption || undefined
-                };
-            } else if (telegramMsg.video) {
-                const fileBuffer = await this.downloadTelegramFile(telegramMsg.video.file_id);
-                content = {
-                    video: fileBuffer,
-                    caption: telegramMsg.caption || undefined
-                };
-            } else if (telegramMsg.audio || telegramMsg.voice) {
-                const audio = telegramMsg.audio || telegramMsg.voice;
-                const fileBuffer = await this.downloadTelegramFile(audio.file_id);
-                content = { audio: fileBuffer };
-            } else if (telegramMsg.document) {
-                const fileBuffer = await this.downloadTelegramFile(telegramMsg.document.file_id);
-                content = {
-                    document: fileBuffer,
-                    fileName: telegramMsg.document.file_name || 'document',
-                    caption: telegramMsg.caption || undefined
-                };
-            } else if (telegramMsg.sticker) {
-                const fileBuffer = await this.downloadTelegramFile(telegramMsg.sticker.file_id);
-                content = { sticker: fileBuffer };
-            }
-
-            if (Object.keys(content).length > 0) {
-                await this.whatsappBot.sendMessage(jid, content);
-                logger.info(`✅ Message sent to WhatsApp: ${jid}`);
-                
-                // Send confirmation reaction
-                try {
-                    await this.bot.setMessageReaction(this.groupId, telegramMsg.message_id, [{ type: 'emoji', emoji: '✅' }]);
-                } catch (reactionError) {
-                    // Ignore reaction errors
-                }
-            }
-
-        } catch (error) {
-            logger.error('Error sending message to WhatsApp:', error);
-            
-            // Send error reaction
-            try {
-                await this.bot.setMessageReaction(this.groupId, telegramMsg.message_id, [{ type: 'emoji', emoji: '❌' }]);
-            } catch (reactionError) {
-                // Ignore reaction errors
-            }
+async sendToWhatsApp(jid, telegramMsg) {
+    try {
+        if (telegramMsg.text) {
+            await this.whatsappBot.sock.sendMessage(jid, { text: telegramMsg.text });
+        } else if (telegramMsg.photo) {
+            const photo = telegramMsg.photo[telegramMsg.photo.length - 1]; // best resolution
+            const fileBuffer = await this.downloadTelegramFile(photo.file_id);
+            await this.whatsappBot.sock.sendMessage(jid, {
+                image: fileBuffer,
+                caption: telegramMsg.caption || ''
+            });
+        } else if (telegramMsg.document) {
+            const fileBuffer = await this.downloadTelegramFile(telegramMsg.document.file_id);
+            await this.whatsappBot.sock.sendMessage(jid, {
+                document: fileBuffer,
+                fileName: telegramMsg.document.file_name || 'file'
+            });
+        } else if (telegramMsg.video) {
+            const video = telegramMsg.video;
+            const fileBuffer = await this.downloadTelegramFile(video.file_id);
+            await this.whatsappBot.sock.sendMessage(jid, {
+                video: fileBuffer,
+                caption: telegramMsg.caption || ''
+            });
+        } else if (telegramMsg.voice) {
+            const fileBuffer = await this.downloadTelegramFile(telegramMsg.voice.file_id);
+            await this.whatsappBot.sock.sendMessage(jid, { audio: fileBuffer });
         }
+    } catch (error) {
+        logger.error(`Failed to send Telegram message to WhatsApp (${jid}):`, error);
     }
+}
 
-    async downloadTelegramFile(fileId) {
-        try {
-            const fileInfo = await this.bot.getFile(fileId);
-            const fileUrl = `https://api.telegram.org/file/bot${this.bot.token}/${fileInfo.file_path}`;
-            
-            const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
-            return Buffer.from(response.data);
-        } catch (error) {
-            logger.error('Error downloading Telegram file:', error);
-            throw error;
-        }
-    }
+async downloadTelegramFile(fileId) {
+    const fileUrl = await this.bot.getFileLink(fileId);
+    const response = await axios.get(fileUrl.href, { responseType: 'arraybuffer' });
+    return Buffer.from(response.data);
+}
 
     async handleWhatsAppCall(call) {
         try {
