@@ -1,4 +1,4 @@
-const logger = require('../utils/logger');
+const logger = require('../core/logger');
 
 /**
  * Sync-related commands for WhatsApp bot
