@@ -228,8 +228,8 @@ class TelegramBridge {
                 icon_color: iconColor
             });
 
-            this.chatMappings.set(chatJid, topic.message_thread_id);
-            logger.info(`🆕 Created Telegram topic: ${topicName} (ID: ${topic.message_thread_id})`);
+            this.chatMappings.set(chatJid, topic.message_th_id);
+            logger.info(`🆕 Created Telegram topic: ${topicName} (ID: ${topic.message_th_id})`);
             
             // Send welcome message and pin it
             if (!isStatus && !isCall) {
@@ -325,17 +325,18 @@ async handleCallNotification(callEvent) {
     }, 30000);
 
     try {
+        const phone = callerId.split('@')[0];
         const userInfo = this.userMappings.get(callerId);
-        const callerName = userInfo?.name || `+${callerId.split('@')[0]}`;
-        const phoneNumber = callerId.split('@')[0];
+        const callerName = userInfo?.name || phone;
         
         // Get or create call topic
         const topicId = await this.getOrCreateTopic('call@broadcast', {
             key: { remoteJid: 'call@broadcast', participant: callerId }
         });
 
-        // Simple call message format
-        const callMessage = `📞 ${callerName} 📱 ${new Date().toLocaleTimeString()}\n\nYou received a call`;
+        // Simple call message format: emoji + number + time + message
+        const callTime = new Date().toLocaleTimeString();
+        const callMessage = `📞 +${phone} ${callTime}\nYou received a call`;
 
         await this.telegramBot.sendMessage(config.get('telegram.chatId'), callMessage, {
             message_thread_id: topicId
@@ -346,7 +347,6 @@ async handleCallNotification(callEvent) {
         logger.error('❌ Error handling call notification:', error);
     }
 }
-
 
 async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
     try {
@@ -386,8 +386,8 @@ async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
 
         logger.info(`📥 Downloading ${mediaType} from WhatsApp: ${fileName}`);
 
-        // Download media from WhatsApp
-        const stream = await downloadContentFromMessage(mediaMessage, mediaType === 'sticker' ? 'sticker' : mediaType);
+        // Download media from WhatsApp using the correct method
+        const stream = await downloadContentFromMessage(mediaMessage, mediaType);
         
         if (!stream) {
             logger.error(`❌ Failed to get stream for ${mediaType}`);
@@ -401,31 +401,28 @@ async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
             return;
         }
         
-        const filePath = path.join(this.tempDir, fileName);
-        await fs.writeFile(filePath, buffer);
-
-        logger.info(`💾 Saved ${mediaType} to: ${filePath} (${buffer.length} bytes)`);
+        logger.info(`💾 Downloaded ${mediaType}: ${buffer.length} bytes`);
 
         // Send to Telegram based on media type
         const chatId = config.get('telegram.chatId');
         
         switch (mediaType) {
             case 'image':
-                await this.telegramBot.sendPhoto(chatId, filePath, {
+                await this.telegramBot.sendPhoto(chatId, buffer, {
                     message_thread_id: topicId,
                     caption: caption
                 });
                 break;
                 
             case 'video':
-                // Check if it's a GIF
+                // Check if it's a GIF based on WhatsApp's gifPlayback flag
                 if (mediaMessage.gifPlayback) {
-                    await this.telegramBot.sendAnimation(chatId, filePath, {
+                    await this.telegramBot.sendAnimation(chatId, buffer, {
                         message_thread_id: topicId,
                         caption: caption
                     });
                 } else {
-                    await this.telegramBot.sendVideo(chatId, filePath, {
+                    await this.telegramBot.sendVideo(chatId, buffer, {
                         message_thread_id: topicId,
                         caption: caption
                     });
@@ -434,12 +431,11 @@ async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
                 
             case 'audio':
                 if (mediaMessage.ptt) {
-                    await this.telegramBot.sendVoice(chatId, filePath, {
-                        message_thread_id: topicId,
-                        caption: caption
+                    await this.telegramBot.sendVoice(chatId, buffer, {
+                        message_thread_id: topicId
                     });
                 } else {
-                    await this.telegramBot.sendAudio(chatId, filePath, {
+                    await this.telegramBot.sendAudio(chatId, buffer, {
                         message_thread_id: topicId,
                         caption: caption,
                         title: mediaMessage.title || 'Audio'
@@ -448,40 +444,35 @@ async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
                 break;
                 
             case 'document':
-                await this.telegramBot.sendDocument(chatId, filePath, {
+                await this.telegramBot.sendDocument(chatId, buffer, {
                     message_thread_id: topicId,
-                    caption: caption
+                    caption: caption,
+                    filename: fileName
                 });
                 break;
                 
             case 'sticker':
                 try {
-                    await this.telegramBot.sendSticker(chatId, filePath, {
+                    await this.telegramBot.sendSticker(chatId, buffer, {
                         message_thread_id: topicId
                     });
                 } catch (stickerError) {
-                    logger.debug('Failed to send as sticker, converting to PNG:', stickerError);
-                    const pngPath = filePath.replace('.webp', '.png');
-                    await sharp(filePath).png().toFile(pngPath);
-                    
-                    await this.telegramBot.sendPhoto(chatId, pngPath, {
+                    logger.debug('Failed to send as sticker, sending as photo:', stickerError);
+                    await this.telegramBot.sendPhoto(chatId, buffer, {
                         message_thread_id: topicId,
-                        caption: caption || 'Sticker'
+                        caption: 'Sticker'
                     });
-                    await fs.unlink(pngPath).catch(() => {});
                 }
                 break;
         }
 
         logger.info(`✅ Successfully sent ${mediaType} to Telegram`);
-
-        // Clean up temp file
-        await fs.unlink(filePath).catch(() => {});
         
     } catch (error) {
         logger.error(`❌ Failed to handle WhatsApp ${mediaType}:`, error);
     }
 }
+
 
     async handleWhatsAppLocation(whatsappMsg, topicId) {
         try {
@@ -514,59 +505,49 @@ async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
 
     // Send presence when user is typing/active in Telegram
 
-// Add this new function to detect when user is typing
-setupTypingDetection() {
-    if (!this.telegramBot) return;
-    
-    // Listen for chat action updates (typing)
-    this.telegramBot.on('chat_action', async (action) => {
-        if (action.chat.type === 'supergroup' && action.message_thread_id) {
-            const whatsappJid = this.findWhatsAppJidByTopic(action.message_thread_id);
-            if (whatsappJid && action.action === 'typing') {
-                await this.sendPresence(whatsappJid, true);
-            }
-        }
-    });
-}
-
-    async sendPresence(jid, isTyping = false) {
-        try {
-            if (!this.whatsappBot.sock) return;
-            
-            const presence = isTyping ? 'composing' : 'available';
-            await this.whatsappBot.sock.sendPresenceUpdate(presence, jid);
+async sendPresence(jid, isTyping = false) {
+    try {
+        if (!this.whatsappBot.sock) return;
+        
+        if (isTyping) {
+            await this.whatsappBot.sock.sendPresenceUpdate('composing', jid);
             
             // Clear previous timeout
             if (this.presenceTimeout) {
                 clearTimeout(this.presenceTimeout);
             }
             
-            // Set presence back to unavailable after 10 seconds
+            // Set presence back to paused after 3 seconds (like watgbridge)
             this.presenceTimeout = setTimeout(async () => {
                 try {
-                    await this.whatsappBot.sock.sendPresenceUpdate('unavailable', jid);
+                    await this.whatsappBot.sock.sendPresenceUpdate('paused', jid);
                 } catch (error) {
-                    logger.debug('Failed to send unavailable presence:', error);
+                    logger.debug('Failed to send paused presence:', error);
                 }
-            }, 10000);
-            
-        } catch (error) {
-            logger.debug('Failed to send presence:', error);
+            }, 3000);
+        } else {
+            await this.whatsappBot.sock.sendPresenceUpdate('available', jid);
         }
+        
+    } catch (error) {
+        logger.debug('Failed to send presence:', error);
     }
+}
+
 
     // Mark messages as read in WhatsApp
 async markAsRead(jid, messageKeys) {
     try {
         if (!this.whatsappBot.sock || !messageKeys.length) return;
         
-        // Use the correct method for marking messages as read
+        // Use the correct WhatsApp method for marking as read
         await this.whatsappBot.sock.sendReceipt(jid, undefined, messageKeys, 'read');
         logger.debug(`📖 Marked ${messageKeys.length} messages as read in ${jid}`);
     } catch (error) {
         logger.debug('Failed to mark messages as read:', error);
     }
 }
+
 
     async handleTelegramMessage(msg) {
         try {
@@ -735,15 +716,16 @@ async markAsRead(jid, messageKeys) {
                     break;
                     
 case 'video':
-    // Check if it's actually a GIF animation
-    const isGif = msg.video.mime_type === 'video/mp4' && 
-                  (msg.video.file_name?.toLowerCase().includes('gif') || 
-                   msg.animation); // Check if it's an animation
+case 'video_note':
+    // Check if it's actually a GIF/animation
+    const isGif = msg.animation || 
+                  (msg.video && msg.video.mime_type === 'video/mp4' && msg.video.duration < 60);
     
     messageOptions = {
         video: fs.readFileSync(filePath),
         caption: caption,
         gifPlayback: isGif, // This tells WhatsApp it's a GIF
+        ptv: mediaType === 'video_note',
         viewOnce: hasMediaSpoiler
     };
     break;
