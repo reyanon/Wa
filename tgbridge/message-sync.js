@@ -1,5 +1,5 @@
 const logger = require('../core/logger');
-const config = require('../sync-config');
+const config = require('./config');
 
 class WhatsAppMessageSyncDetector {
     constructor(whatsappBot, telegramBridge) {
