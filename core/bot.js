@@ -6,21 +6,16 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
+const TelegramBridge = require('../bridge/telegram-bridge');
 
 class AdvancedWhatsAppBot {
     constructor() {
         this.sock = null;
         this.authPath = './auth_info';
         this.messageHandler = new MessageHandler(this);
+        this.telegramBridge = null;
         this.isShuttingDown = false;
         this.loadedModules = new Map();
-        this.startTime = new Date();
-        this.stats = {
-            messagesReceived: 0,
-            messagesSent: 0,
-            commandsExecuted: 0,
-            errors: 0
-        };
     }
 
     async initialize() {
@@ -29,6 +24,12 @@ class AdvancedWhatsAppBot {
         // Load modules
         await this.loadModules();
         
+        // Initialize Telegram bridge if enabled
+        if (config.get('telegram.enabled') && config.get('telegram.botToken')) {
+            this.telegramBridge = new TelegramBridge(this);
+            await this.telegramBridge.initialize();
+        }
+
         // Start WhatsApp connection
         await this.startWhatsApp();
         
@@ -45,7 +46,7 @@ class AdvancedWhatsAppBot {
             const files = await fs.readdir(modulesPath);
             
             for (const file of files) {
-                if (file.endsWith('.js') && !file.includes('telegram-bridge-bot')) {
+                if (file.endsWith('.js')) {
                     await this.loadModule(path.join(modulesPath, file));
                 }
             }
@@ -84,13 +85,6 @@ class AdvancedWhatsAppBot {
                 }
             }
 
-            // Register message hooks
-            if (moduleInstance.messageHooks) {
-                for (const [hookName, handler] of Object.entries(moduleInstance.messageHooks)) {
-                    this.messageHandler.registerMessageHook(hookName, handler.bind(moduleInstance));
-                }
-            }
-
             this.loadedModules.set(moduleId, {
                 instance: moduleInstance,
                 path: modulePath,
@@ -109,21 +103,11 @@ class AdvancedWhatsAppBot {
             typeof module === 'object' &&
             module.name &&
             module.version &&
-            (module.commands || module.messageHooks)
+            (module.commands || module.handlers)
         );
     }
 
     async startWhatsApp() {
-        // Clear auth if corrupted
-        if (config.get('bot.clearAuthOnStart', false)) {
-            try {
-                await fs.remove(this.authPath);
-                logger.info('🧹 Cleared authentication data');
-            } catch (error) {
-                logger.debug('No auth data to clear');
-            }
-        }
-
         const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
         const { version } = await fetchLatestBaileysVersion();
 
@@ -132,9 +116,7 @@ class AdvancedWhatsAppBot {
             version,
             printQRInTerminal: false,
             logger: logger.child({ module: 'baileys' }),
-            getMessage: async (key) => ({ conversation: 'Message not found' }),
-            generateHighQualityLinkPreview: true,
-            markOnlineOnConnect: false
+            getMessage: async (key) => ({ conversation: 'Message not found' })
         });
 
         this.setupEventHandlers(saveCreds);
@@ -164,17 +146,7 @@ class AdvancedWhatsAppBot {
         });
 
         this.sock.ev.on('creds.update', saveCreds);
-        this.sock.ev.on('messages.upsert', async (m) => {
-            this.stats.messagesReceived += m.messages.length;
-            await this.messageHandler.handleMessages(m);
-        });
-
-        // Handle call events
-        this.sock.ev.on('call', async (calls) => {
-            for (const call of calls) {
-                await this.messageHandler.triggerMessageHooks('call_received', { call });
-            }
-        });
+        this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
     }
 
     async onConnectionOpen() {
@@ -189,32 +161,34 @@ class AdvancedWhatsAppBot {
         // Send startup message to owner
         await this.sendStartupMessage();
         
-        // Trigger connection hooks
-        await this.messageHandler.triggerMessageHooks('whatsapp_connected', { 
-            user: this.sock.user 
-        });
+        // Initialize Telegram bridge connection
+        if (this.telegramBridge) {
+            await this.telegramBridge.syncWhatsAppConnection();
+        }
     }
 
     async sendStartupMessage() {
         const owner = config.get('bot.owner');
         if (!owner) return;
 
-        const modulesList = Array.from(this.loadedModules.keys()).join(', ');
         const startupMessage = `🚀 *${config.get('bot.name')} v${config.get('bot.version')}* is now online!\n\n` +
-                              `🔥 *System Status:*\n` +
-                              `• 📱 WhatsApp: Connected\n` +
-                              `• 🔧 Modules: ${this.loadedModules.size} loaded\n` +
-                              `• 📦 Active Modules: ${modulesList}\n` +
+                              `🔥 *Advanced Features Active:*\n` +
+                              `• 📱 Modular Architecture\n` +
+                              `• 🤖 Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
                               `• 🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
+                              `• 🔧 Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n` +
                               `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n\n` +
                               `Type *${config.get('bot.prefix')}menu* to see all commands!`;
 
         try {
             await this.sock.sendMessage(owner, { text: startupMessage });
-            this.stats.messagesSent++;
+            
+            // Also log to Telegram
+            if (this.telegramBridge) {
+                await this.telegramBridge.logToTelegram('🚀 WhatsApp Bot Started', startupMessage);
+            }
         } catch (error) {
             logger.error('Failed to send startup message:', error);
-            this.stats.errors++;
         }
     }
 
@@ -222,39 +196,15 @@ class AdvancedWhatsAppBot {
         if (!this.sock) {
             throw new Error('WhatsApp socket not initialized');
         }
-        const result = await this.sock.sendMessage(jid, content);
-        this.stats.messagesSent++;
-        return result;
-    }
-
-    getStats() {
-        return {
-            ...this.stats,
-            uptime: Date.now() - this.startTime.getTime(),
-            startTime: this.startTime,
-            loadedModules: Array.from(this.loadedModules.keys()),
-            isConnected: !!this.sock?.user
-        };
-    }
-
-    getModuleInstance(moduleName) {
-        const module = this.loadedModules.get(moduleName);
-        return module ? module.instance : null;
+        return await this.sock.sendMessage(jid, content);
     }
 
     async shutdown() {
         logger.info('🛑 Shutting down bot...');
         this.isShuttingDown = true;
         
-        // Shutdown all modules
-        for (const [name, module] of this.loadedModules) {
-            try {
-                if (module.instance.shutdown) {
-                    await module.instance.shutdown();
-                }
-            } catch (error) {
-                logger.error(`Error shutting down module ${name}:`, error);
-            }
+        if (this.telegramBridge) {
+            await this.telegramBridge.shutdown();
         }
         
         if (this.sock) {
