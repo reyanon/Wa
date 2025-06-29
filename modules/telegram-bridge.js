@@ -6,7 +6,7 @@ const mime = require('mime-types');
 const sharp = require('sharp');
 const NodeCache = require('node-cache');
 
-const logger = require('../src/logger');
+const logger = require('../core/logger');
 const config = require('../config');
 
 class TelegramBridge {
