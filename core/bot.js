@@ -6,7 +6,7 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const TelegramBridge = require('../tg/telegram-bridge');
+const TelegramBridge = require('../modules/telegram-bridge');
 
 class AdvancedWhatsAppBot {
     constructor() {
@@ -46,7 +46,7 @@ class AdvancedWhatsAppBot {
             const files = await fs.readdir(modulesPath);
             
             for (const file of files) {
-                if (file.endsWith('.js')) {
+                if (file.endsWith('.js') && file !== 'telegram-bridge.js') {
                     await this.loadModule(path.join(modulesPath, file));
                 }
             }
@@ -147,6 +147,11 @@ class AdvancedWhatsAppBot {
 
         this.sock.ev.on('creds.update', saveCreds);
         this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
+        
+        // Setup Telegram bridge handlers after socket is ready
+        if (this.telegramBridge) {
+            this.telegramBridge.setupWhatsAppHandlers();
+        }
     }
 
     async onConnectionOpen() {
