@@ -5,8 +5,13 @@ const fs = require('fs-extra');
 const path = require('path');
 const axios = require('axios');
 const sharp = require('sharp');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegStatic = require('ffmpeg-static');
 const mime = require('mime-types');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
+
+// Set ffmpeg path
+ffmpeg.setFfmpegPath(ffmpegStatic);
 
 class TelegramBridge {
     constructor(whatsappBot) {
@@ -23,10 +28,8 @@ class TelegramBridge {
 
     async initialize() {
         const token = config.get('telegram.botToken');
-        const chatId = config.get('telegram.chatId');
-        
-        if (!token || token.includes('7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI') || !chatId || chatId.includes('-1002287300661')) {
-            logger.warn('⚠️ Telegram bot token or chat ID not configured properly');
+        if (!token || token.includes('JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ')) {
+            logger.warn('⚠️ Telegram bot token not configured properly');
             return;
         }
 
@@ -117,7 +120,7 @@ class TelegramBridge {
         if (!this.telegramBot) return;
 
         const logChannel = config.get('telegram.logChannel');
-        if (!logChannel || logChannel.includes('YOUR_LOG_CHANNEL')) {
+        if (!logChannel || logChannel.includes('2345678901')) {
             logger.debug('Telegram log channel not configured');
             return;
         }
@@ -179,9 +182,17 @@ class TelegramBridge {
         let userPhone = participant.split('@')[0];
         
         try {
-            // Try to get pushname from message
-            if (whatsappMsg.pushName) {
-                userName = whatsappMsg.pushName;
+            // Try to get contact name from WhatsApp
+            if (this.whatsappBot.sock) {
+                const contact = await this.whatsappBot.sock.onWhatsApp(participant);
+                if (contact && contact[0] && contact[0].notify) {
+                    userName = contact[0].notify;
+                }
+                
+                // Try to get pushname from message
+                if (whatsappMsg.pushName) {
+                    userName = whatsappMsg.pushName;
+                }
             }
         } catch (error) {
             logger.debug('Could not fetch contact info:', error);
@@ -203,7 +214,7 @@ class TelegramBridge {
         }
 
         const chatId = config.get('telegram.chatId');
-        if (!chatId || chatId.includes('YOUR_CHAT_ID')) {
+        if (!chatId || chatId.includes('2345678901')) {
             logger.error('❌ Telegram chat ID not configured properly');
             return null;
         }
@@ -329,7 +340,8 @@ class TelegramBridge {
     }
 
     async handleCallNotification(callEvent) {
-        if (!this.telegramBot) return;
+        if (!config.get('telegram.settings.enableCallNotifications', true)) return;
+        if (!this.telegramBot || !config.get('telegram.settings.syncCalls')) return;
 
         const callerId = callEvent.from;
         const callKey = `${callerId}_${callEvent.id}`;
@@ -347,19 +359,28 @@ class TelegramBridge {
         try {
             const userInfo = this.userMappings.get(callerId);
             const callerName = userInfo?.name || callerId.split('@')[0];
-            
+            const callType = callEvent.isVideo ? '📹 Video' : '📞 Voice';
+            const status = callEvent.status === 'offer' ? 'Incoming' : 
+                          callEvent.status === 'accept' ? 'Accepted' : 
+                          callEvent.status === 'reject' ? 'Rejected' : 'Ended';
+
             // Get or create call topic
             const topicId = await this.getOrCreateTopic('call@broadcast', {
                 key: { remoteJid: 'call@broadcast', participant: callerId }
             });
 
-            const callMessage = `📞 Incoming call from +${callerId.split('@')[0]}`;
+            const callMessage = `${callType} Call ${status}\n\n` +
+                               `👤 **Caller:** ${callerName}\n` +
+                               `📱 **Number:** +${callerId.split('@')[0]}\n` +
+                               `⏰ **Time:** ${new Date().toLocaleString()}\n` +
+                               `📊 **Status:** ${status}`;
 
             await this.telegramBot.sendMessage(config.get('telegram.chatId'), callMessage, {
-                message_thread_id: topicId
+                message_thread_id: topicId,
+                parse_mode: 'Markdown'
             });
 
-            logger.debug(`📞 Sent call notification from ${callerName}`);
+            logger.debug(`📞 Sent call notification: ${callType} ${status} from ${callerName}`);
         } catch (error) {
             logger.error('❌ Error handling call notification:', error);
         }
@@ -622,18 +643,38 @@ class TelegramBridge {
                     break;
                     
                 case 'video':
-                case 'video_note':
                     await this.whatsappBot.sendMessage(whatsappJid, {
                         video: { url: filePath },
                         caption: caption
                     });
                     break;
                     
-                case 'voice':
+                case 'video_note':
+                    const convertedPath = path.join(this.tempDir, `converted_video_note_${Date.now()}.mp4`);
+                    await this.convertVideoNote(filePath, convertedPath);
+                    
                     await this.whatsappBot.sendMessage(whatsappJid, {
-                        audio: { url: filePath },
-                        ptt: true
+                        video: { url: convertedPath },
+                        ptv: true,
+                        caption: caption
                     });
+                    
+                    await fs.unlink(convertedPath).catch(() => {});
+                    break;
+                    
+                case 'voice':
+                    const voicePath = path.join(this.tempDir, `voice_${Date.now()}.ogg`);
+                    const waveform = await this.generateWaveform(filePath);
+                    await this.convertToWhatsAppVoice(filePath, voicePath);
+                    
+                    await this.whatsappBot.sendMessage(whatsappJid, {
+                        audio: { url: voicePath },
+                        ptt: true,
+                        waveform: waveform,
+                        seconds: await this.getAudioDuration(voicePath)
+                    });
+                    
+                    await fs.unlink(voicePath).catch(() => {});
                     break;
                     
                 case 'audio':
@@ -736,6 +777,64 @@ class TelegramBridge {
         }
     }
 
+    async convertVideoNote(inputPath, outputPath) {
+        return new Promise((resolve, reject) => {
+            ffmpeg(inputPath)
+                .videoCodec('libx264')
+                .audioCodec('aac')
+                .format('mp4')
+                .outputOptions([
+                    '-movflags +faststart',
+                    '-vf scale=640:640:force_original_aspect_ratio=decrease,pad=640:640:(ow-iw)/2:(oh-ih)/2'
+                ])
+                .on('end', resolve)
+                .on('error', reject)
+                .save(outputPath);
+        });
+    }
+
+    async convertToWhatsAppVoice(inputPath, outputPath) {
+        return new Promise((resolve, reject) => {
+            ffmpeg(inputPath)
+                .audioCodec('libopus')
+                .format('ogg')
+                .audioChannels(1)
+                .audioFrequency(16000)
+                .audioBitrate('24k')
+                .on('end', resolve)
+                .on('error', reject)
+                .save(outputPath);
+        });
+    }
+
+    async generateWaveform(audioPath) {
+        try {
+            const duration = await this.getAudioDuration(audioPath);
+            const samples = Math.min(Math.floor(duration), 60);
+            const waveform = [];
+            
+            for (let i = 0; i < samples; i++) {
+                waveform.push(Math.floor(Math.random() * 100) + 1);
+            }
+            
+            return Buffer.from(waveform);
+        } catch (error) {
+            return Buffer.from([50, 75, 25, 100, 60, 80, 40, 90, 30, 70]);
+        }
+    }
+
+    async getAudioDuration(audioPath) {
+        return new Promise((resolve, reject) => {
+            ffmpeg.ffprobe(audioPath, (err, metadata) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(Math.floor(metadata.format.duration || 0));
+                }
+            });
+        });
+    }
+
     async sendSimpleMessage(topicId, text, sender) {
         if (!topicId) return null;
 
@@ -745,11 +844,17 @@ class TelegramBridge {
             // Add sender info for status messages
             let messageText = text;
             if (sender === 'status@broadcast') {
-                messageText = `📱 Status from +${sender.split('@')[0]}\n\n${text}`;
+                const participant = this.findParticipantFromStatusMessage(text);
+                if (participant) {
+                    const userInfo = this.userMappings.get(participant);
+                    const name = userInfo?.name || participant.split('@')[0];
+                    messageText = `👤 **${name}** (+${participant.split('@')[0]})\n\n${text}`;
+                }
             }
 
             const sentMessage = await this.telegramBot.sendMessage(chatId, messageText, {
-                message_thread_id: topicId
+                message_thread_id: topicId,
+                parse_mode: 'Markdown'
             });
 
             return sentMessage.message_id;
@@ -757,6 +862,12 @@ class TelegramBridge {
             logger.error('❌ Failed to send message to Telegram:', error);
             return null;
         }
+    }
+
+    findParticipantFromStatusMessage(text) {
+        // This would need to be implemented based on how you track status messages
+        // For now, return null
+        return null;
     }
 
     async streamToBuffer(stream) {
@@ -794,20 +905,6 @@ class TelegramBridge {
             `📱 WhatsApp: Connected\n` +
             `🔗 Telegram Bridge: Active\n` +
             `🚀 Ready to bridge messages!`);
-    }
-
-    // Setup WhatsApp event handlers
-    setupWhatsAppHandlers() {
-        if (!this.whatsappBot.sock) return;
-
-        // Handle call events
-        this.whatsappBot.sock.ev.on('call', async (calls) => {
-            for (const call of calls) {
-                await this.handleCallNotification(call);
-            }
-        });
-
-        logger.info('📱 WhatsApp event handlers set up for Telegram bridge');
     }
 
     async shutdown() {
