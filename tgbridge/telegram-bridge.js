@@ -42,6 +42,7 @@ class TelegramBridge {
             
             await this.setupTelegramHandlers();
             logger.info('✅ Telegram bridge initialized');
+            this.setupTypingDetection(); 
         } catch (error) {
             logger.error('❌ Failed to initialize Telegram bridge:', error);
         }
@@ -349,6 +350,8 @@ async handleCallNotification(callEvent) {
 
 async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
     try {
+        logger.info(`📥 Processing ${mediaType} from WhatsApp`);
+        
         let mediaMessage;
         let fileName = `media_${Date.now()}`;
         let caption = this.extractText(whatsappMsg);
@@ -376,10 +379,21 @@ async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
                 break;
         }
 
+        if (!mediaMessage) {
+            logger.error(`❌ No media message found for ${mediaType}`);
+            return;
+        }
+
         logger.info(`📥 Downloading ${mediaType} from WhatsApp: ${fileName}`);
 
         // Download media from WhatsApp
         const stream = await downloadContentFromMessage(mediaMessage, mediaType === 'sticker' ? 'sticker' : mediaType);
+        
+        if (!stream) {
+            logger.error(`❌ Failed to get stream for ${mediaType}`);
+            return;
+        }
+        
         const buffer = await this.streamToBuffer(stream);
         
         if (!buffer || buffer.length === 0) {
@@ -499,6 +513,22 @@ async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
     }
 
     // Send presence when user is typing/active in Telegram
+
+// Add this new function to detect when user is typing
+setupTypingDetection() {
+    if (!this.telegramBot) return;
+    
+    // Listen for chat action updates (typing)
+    this.telegramBot.on('chat_action', async (action) => {
+        if (action.chat.type === 'supergroup' && action.message_thread_id) {
+            const whatsappJid = this.findWhatsAppJidByTopic(action.message_thread_id);
+            if (whatsappJid && action.action === 'typing') {
+                await this.sendPresence(whatsappJid, true);
+            }
+        }
+    });
+}
+
     async sendPresence(jid, isTyping = false) {
         try {
             if (!this.whatsappBot.sock) return;
@@ -705,8 +735,10 @@ async markAsRead(jid, messageKeys) {
                     break;
                     
 case 'video':
-    // Check if it's a GIF by looking at the mime type or file extension
-    const isGif = msg.video.mime_type === 'video/mp4' && msg.video.file_name && msg.video.file_name.toLowerCase().endsWith('.gif');
+    // Check if it's actually a GIF animation
+    const isGif = msg.video.mime_type === 'video/mp4' && 
+                  (msg.video.file_name?.toLowerCase().includes('gif') || 
+                   msg.animation); // Check if it's an animation
     
     messageOptions = {
         video: fs.readFileSync(filePath),
@@ -715,6 +747,7 @@ case 'video':
         viewOnce: hasMediaSpoiler
     };
     break;
+
 
                     
                 case 'voice':
