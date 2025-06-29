@@ -6,7 +6,7 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const TelegramBridge = require('../watg/telegram-bridge');
+const TelegramBridge = require('../tgbridge/telegram-bridge');
 
 class AdvancedWhatsAppBot {
     constructor() {
