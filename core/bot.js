@@ -6,8 +6,7 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const TelegramBridge = require('./bridge');
-
+const TelegramBridge = require('../modules/telegram-bridge');
 
 class AdvancedWhatsAppBot {
     constructor() {
@@ -27,12 +26,13 @@ class AdvancedWhatsAppBot {
         
         // Initialize Telegram bridge if enabled
         if (config.get('telegram.enabled') && config.get('telegram.botToken')) {
+            this.telegramBridge = new TelegramBridge(this);
             await this.telegramBridge.initialize();
         }
 
         // Start WhatsApp connection
         await this.startWhatsApp();
-        this.messageHandler = new MessageHandler(this);
+        
         logger.info('✅ Bot initialized successfully!');
     }
 
@@ -208,7 +208,7 @@ class AdvancedWhatsAppBot {
         }
         
         if (this.sock) {
-            await this.sock.end();
+            await this.sock.logout();
         }
         
         logger.info('✅ Bot shutdown complete');
