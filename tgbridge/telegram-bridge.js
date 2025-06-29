@@ -227,8 +227,8 @@ class TelegramBridge {
                 icon_color: iconColor
             });
 
-            this.chatMappings.set(chatJid, topic.message_th_id);
-            logger.info(`🆕 Created Telegram topic: ${topicName} (ID: ${topic.message_th_id})`);
+            this.chatMappings.set(chatJid, topic.message_thread_id);
+            logger.info(`🆕 Created Telegram topic: ${topicName} (ID: ${topic.message_thread_id})`);
             
             // Send welcome message and pin it
             if (!isStatus && !isCall) {
@@ -445,7 +445,6 @@ class TelegramBridge {
         }
     }
 
-
     async handleWhatsAppLocation(whatsappMsg, topicId) {
         try {
             const locationMessage = whatsappMsg.message.locationMessage;
@@ -476,50 +475,43 @@ class TelegramBridge {
     }
 
     // Send presence when user is typing/active in Telegram
-
-async sendPresence(jid, isTyping = false) {
-    try {
-        if (!this.whatsappBot.sock) return;
-        
-        if (isTyping) {
-            await this.whatsappBot.sock.sendPresenceUpdate('composing', jid);
+    async sendPresence(jid, isTyping = false) {
+        try {
+            if (!this.whatsappBot.sock) return;
+            
+            const presence = isTyping ? 'composing' : 'available';
+            await this.whatsappBot.sock.sendPresenceUpdate(presence, jid);
             
             // Clear previous timeout
             if (this.presenceTimeout) {
                 clearTimeout(this.presenceTimeout);
             }
             
-            // Set presence back to paused after 3 seconds (like watgbridge)
+            // Set presence back to unavailable after 10 seconds
             this.presenceTimeout = setTimeout(async () => {
                 try {
-                    await this.whatsappBot.sock.sendPresenceUpdate('paused', jid);
+                    await this.whatsappBot.sock.sendPresenceUpdate('unavailable', jid);
                 } catch (error) {
-                    logger.debug('Failed to send paused presence:', error);
+                    logger.debug('Failed to send unavailable presence:', error);
                 }
-            }, 3000);
-        } else {
-            await this.whatsappBot.sock.sendPresenceUpdate('available', jid);
+            }, 10000);
+            
+        } catch (error) {
+            logger.debug('Failed to send presence:', error);
         }
-        
-    } catch (error) {
-        logger.debug('Failed to send presence:', error);
     }
-}
-
 
     // Mark messages as read in WhatsApp
-async markAsRead(jid, messageKeys) {
-    try {
-        if (!this.whatsappBot.sock || !messageKeys.length) return;
-        
-        // Use the correct WhatsApp method for marking as read
-        await this.whatsappBot.sock.sendReceipt(jid, undefined, messageKeys, 'read');
-        logger.debug(`📖 Marked ${messageKeys.length} messages as read in ${jid}`);
-    } catch (error) {
-        logger.debug('Failed to mark messages as read:', error);
+    async markAsRead(jid, messageKeys) {
+        try {
+            if (!this.whatsappBot.sock || !messageKeys.length) return;
+            
+            await this.whatsappBot.sock.readMessages(messageKeys);
+            logger.debug(`📖 Marked ${messageKeys.length} messages as read in ${jid}`);
+        } catch (error) {
+            logger.debug('Failed to mark messages as read:', error);
+        }
     }
-}
-
 
     async handleTelegramMessage(msg) {
         try {
@@ -687,22 +679,15 @@ async markAsRead(jid, messageKeys) {
                     };
                     break;
                     
-case 'video':
-case 'video_note':
-    // Check if it's actually a GIF/animation
-    const isGif = msg.animation || 
-                  (msg.video && msg.video.mime_type === 'video/mp4' && msg.video.duration < 60);
-    
-    messageOptions = {
-        video: fs.readFileSync(filePath),
-        caption: caption,
-        gifPlayback: isGif, // This tells WhatsApp it's a GIF
-        ptv: mediaType === 'video_note',
-        viewOnce: hasMediaSpoiler
-    };
-    break;
-
-
+                case 'video':
+                case 'video_note':
+                    messageOptions = {
+                        video: fs.readFileSync(filePath),
+                        caption: caption,
+                        ptv: mediaType === 'video_note', // Push-to-talk video for video notes
+                        viewOnce: hasMediaSpoiler // Send as view once if spoiler
+                    };
+                    break;
                     
                 case 'voice':
                     messageOptions = {
