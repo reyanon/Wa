@@ -6,7 +6,7 @@ const mime = require('mime-types');
 const sharp = require('sharp');
 const NodeCache = require('node-cache');
 
-const logger = require('../core/logger');
+const logger = require('../src/logger');
 const config = require('../config');
 
 class TelegramBridge {
@@ -24,6 +24,7 @@ class TelegramBridge {
         };
         this.messageQueue = [];
         this.isProcessingQueue = false;
+        this.callTracker = new Set(); // Track processed calls
     }
 
     async initialize() {
@@ -72,14 +73,11 @@ class TelegramBridge {
         this.bot.on('error', (error) => {
             logger.error('Telegram bot error:', error);
         });
-
-        // Setup WhatsApp event handlers
-        if (this.whatsappBot.sock) {
-            this.setupWhatsAppHandlers();
-        }
     }
 
     setupWhatsAppHandlers() {
+        if (!this.whatsappBot.sock) return;
+
         // Handle call events
         this.whatsappBot.sock.ev.on('call', async (calls) => {
             for (const call of calls) {
@@ -87,16 +85,7 @@ class TelegramBridge {
             }
         });
 
-        // Handle status updates
-        this.whatsappBot.sock.ev.on('messages.upsert', async ({ messages }) => {
-            for (const msg of messages) {
-                if (msg.key.remoteJid === 'status@broadcast') {
-                    await this.handleWhatsAppStatus(msg);
-                }
-            }
-        });
-
-        // Handle profile picture updates
+        // Handle contacts update for profile pictures
         this.whatsappBot.sock.ev.on('contacts.update', async (contacts) => {
             for (const contact of contacts) {
                 if (contact.imgUrl) {
@@ -109,12 +98,10 @@ class TelegramBridge {
     async initializeTopics() {
         try {
             // Create call logs topic
-            this.topics.callLogs = await this.createOrGetTopic('📞 Call Logs', 
-                '📞 All WhatsApp call logs will appear here');
+            this.topics.callLogs = await this.createOrGetTopic('📞 Call Logs');
 
             // Create status updates topic
-            this.topics.statusUpdates = await this.createOrGetTopic('📱 Status Updates', 
-                '📱 WhatsApp status updates will appear here\n\n💡 Reply to any status to respond on WhatsApp');
+            this.topics.statusUpdates = await this.createOrGetTopic('📱 Status Updates');
 
             logger.info('✅ Telegram topics initialized');
         } catch (error) {
@@ -122,7 +109,7 @@ class TelegramBridge {
         }
     }
 
-    async createOrGetTopic(name, description) {
+    async createOrGetTopic(name) {
         try {
             // Try to find existing topic
             const existingTopic = this.topicCache.get(name);
@@ -133,14 +120,6 @@ class TelegramBridge {
             // Create new topic
             const topic = await this.bot.createForumTopic(this.groupId, name);
             
-            // Pin description message
-            const descMsg = await this.bot.sendMessage(this.groupId, description, {
-                message_thread_id: topic.message_thread_id,
-                parse_mode: 'Markdown'
-            });
-            
-            await this.bot.pinChatMessage(this.groupId, descMsg.message_id);
-
             const topicData = {
                 id: topic.message_thread_id,
                 name: name
@@ -167,7 +146,7 @@ class TelegramBridge {
         try {
             // Get user info
             const userInfo = await this.getUserInfo(jid, pushName, notify);
-            const topicName = `👤 ${userInfo.name}`;
+            const topicName = `${userInfo.name}`;
 
             // Create topic
             const topic = await this.bot.createForumTopic(this.groupId, topicName);
@@ -207,17 +186,14 @@ class TelegramBridge {
         const userId = jid.split('@')[0];
         
         try {
-            // Try to get contact info from WhatsApp
-            const contact = await this.whatsappBot.sock.onWhatsApp(jid);
             const profilePic = await this.getProfilePictureUrl(jid);
             
             return {
                 jid: jid,
                 userId: userId,
-                name: pushName || notify || contact[0]?.notify || userId,
+                name: pushName || notify || userId,
                 number: userId,
                 profilePic: profilePic,
-                isWhatsAppUser: contact[0]?.exists || false,
                 lastSeen: new Date().toISOString()
             };
         } catch (error) {
@@ -228,7 +204,6 @@ class TelegramBridge {
                 name: pushName || notify || userId,
                 number: userId,
                 profilePic: null,
-                isWhatsAppUser: true,
                 lastSeen: new Date().toISOString()
             };
         }
@@ -244,14 +219,10 @@ class TelegramBridge {
     }
 
     createUserInfoMessage(userInfo) {
-        return `👤 **User Information**\n\n` +
-               `📱 **Name:** ${userInfo.name}\n` +
-               `📞 **Number:** +${userInfo.number}\n` +
-               `🆔 **WhatsApp ID:** ${userInfo.jid}\n` +
-               `✅ **WhatsApp User:** ${userInfo.isWhatsAppUser ? 'Yes' : 'No'}\n` +
-               `🕐 **Topic Created:** ${new Date().toLocaleString()}\n\n` +
-               `💬 **All messages with this user will appear in this topic**\n` +
-               `📤 **Reply here to send messages to WhatsApp**`;
+        return `👤 **${userInfo.name}**\n` +
+               `📞 **+${userInfo.number}**\n` +
+               `🆔 **${userInfo.jid}**\n\n` +
+               `💬 Reply here to send messages`;
     }
 
     async sendProfilePicture(jid, threadId) {
@@ -264,8 +235,7 @@ class TelegramBridge {
             const buffer = Buffer.from(response.data);
 
             await this.bot.sendPhoto(this.groupId, buffer, {
-                message_thread_id: threadId,
-                caption: '📸 Profile Picture'
+                message_thread_id: threadId
             });
         } catch (error) {
             logger.error(`Failed to send profile picture for ${jid}:`, error);
@@ -280,7 +250,9 @@ class TelegramBridge {
             const isFromMe = whatsappMsg.key.fromMe;
 
             // Skip status messages (handled separately)
-            if (sender === 'status@broadcast') return;
+            if (sender === 'status@broadcast') {
+                return this.handleWhatsAppStatus(whatsappMsg);
+            }
 
             // Get user topic
             const pushName = whatsappMsg.pushName;
@@ -290,111 +262,19 @@ class TelegramBridge {
             const userTopic = await this.getUserTopic(userJid, pushName, notify);
             if (!userTopic) return;
 
-            // Format message
-            const messageText = await this.formatWhatsAppMessage(whatsappMsg, text, isGroup, isFromMe);
-            
-            // Send to Telegram
-            await this.sendToTelegram(userTopic.id, messageText, whatsappMsg);
+            // Send text message if exists
+            if (text && text.trim()) {
+                await this.bot.sendMessage(this.groupId, text, {
+                    message_thread_id: userTopic.id
+                });
+            }
+
+            // Handle media
+            await this.handleWhatsAppMedia(whatsappMsg, userTopic.id);
 
         } catch (error) {
             logger.error('Error syncing message to Telegram:', error);
         }
-    }
-
-    async formatWhatsAppMessage(msg, text, isGroup, isFromMe) {
-        const timestamp = new Date(msg.messageTimestamp * 1000).toLocaleString();
-        const sender = msg.pushName || msg.key.participant?.split('@')[0] || 'Unknown';
-        
-        let prefix = isFromMe ? '📤 **You**' : `📥 **${sender}**`;
-        if (isGroup) {
-            const groupName = await this.getGroupName(msg.key.remoteJid);
-            prefix += ` (in ${groupName})`;
-        }
-
-        let messageContent = '';
-        
-        // Handle different message types
-        if (msg.message?.imageMessage) {
-            messageContent = '🖼️ *Image*';
-            if (msg.message.imageMessage.caption) {
-                messageContent += `\n📝 ${msg.message.imageMessage.caption}`;
-            }
-        } else if (msg.message?.videoMessage) {
-            messageContent = '🎥 *Video*';
-            if (msg.message.videoMessage.caption) {
-                messageContent += `\n📝 ${msg.message.videoMessage.caption}`;
-            }
-        } else if (msg.message?.audioMessage) {
-            messageContent = '🎵 *Audio*';
-        } else if (msg.message?.documentMessage) {
-            const fileName = msg.message.documentMessage.fileName || 'Document';
-            messageContent = `📄 *Document:* ${fileName}`;
-        } else if (msg.message?.stickerMessage) {
-            messageContent = '🎭 *Sticker*';
-        } else if (msg.message?.locationMessage) {
-            messageContent = '📍 *Location*';
-        } else if (msg.message?.contactMessage) {
-            messageContent = '👤 *Contact*';
-        } else if (text) {
-            messageContent = text;
-        }
-
-        return `${prefix}\n🕐 ${timestamp}\n\n${messageContent}`;
-    }
-
-    async getGroupName(groupJid) {
-        try {
-            const groupMetadata = await this.whatsappBot.sock.groupMetadata(groupJid);
-            return groupMetadata.subject || 'Unknown Group';
-        } catch (error) {
-            return 'Unknown Group';
-        }
-    }
-
-    async sendToTelegram(threadId, text, whatsappMsg = null) {
-        try {
-            // Add to queue for rate limiting
-            this.messageQueue.push({
-                threadId,
-                text,
-                whatsappMsg,
-                timestamp: Date.now()
-            });
-
-            if (!this.isProcessingQueue) {
-                this.processMessageQueue();
-            }
-        } catch (error) {
-            logger.error('Error adding message to Telegram queue:', error);
-        }
-    }
-
-    async processMessageQueue() {
-        this.isProcessingQueue = true;
-
-        while (this.messageQueue.length > 0) {
-            const message = this.messageQueue.shift();
-            
-            try {
-                // Send text message
-                const sentMsg = await this.bot.sendMessage(this.groupId, message.text, {
-                    message_thread_id: message.threadId,
-                    parse_mode: 'Markdown'
-                });
-
-                // Handle media if present
-                if (message.whatsappMsg) {
-                    await this.handleWhatsAppMedia(message.whatsappMsg, message.threadId);
-                }
-
-                // Rate limiting - wait 100ms between messages
-                await new Promise(resolve => setTimeout(resolve, 100));
-            } catch (error) {
-                logger.error('Error processing message from queue:', error);
-            }
-        }
-
-        this.isProcessingQueue = false;
     }
 
     async handleWhatsAppMedia(msg, threadId) {
@@ -402,52 +282,71 @@ class TelegramBridge {
             let mediaBuffer = null;
             let fileName = null;
             let caption = null;
+            let mediaType = null;
 
             if (msg.message?.imageMessage) {
                 mediaBuffer = await this.whatsappBot.sock.downloadMediaMessage(msg);
                 fileName = 'image.jpg';
                 caption = msg.message.imageMessage.caption;
+                mediaType = 'image';
             } else if (msg.message?.videoMessage) {
                 mediaBuffer = await this.whatsappBot.sock.downloadMediaMessage(msg);
                 fileName = 'video.mp4';
                 caption = msg.message.videoMessage.caption;
+                mediaType = 'video';
             } else if (msg.message?.audioMessage) {
                 mediaBuffer = await this.whatsappBot.sock.downloadMediaMessage(msg);
                 fileName = 'audio.ogg';
+                mediaType = 'audio';
             } else if (msg.message?.documentMessage) {
                 mediaBuffer = await this.whatsappBot.sock.downloadMediaMessage(msg);
                 fileName = msg.message.documentMessage.fileName || 'document';
+                mediaType = 'document';
             } else if (msg.message?.stickerMessage) {
                 mediaBuffer = await this.whatsappBot.sock.downloadMediaMessage(msg);
                 fileName = 'sticker.webp';
+                mediaType = 'sticker';
             }
 
-            if (mediaBuffer) {
-                await this.sendMediaToTelegram(threadId, mediaBuffer, fileName, caption);
+            if (mediaBuffer && mediaType) {
+                await this.sendMediaToTelegram(threadId, mediaBuffer, fileName, caption, mediaType);
             }
         } catch (error) {
             logger.error('Error handling WhatsApp media:', error);
         }
     }
 
-    async sendMediaToTelegram(threadId, buffer, fileName, caption = null) {
+    async sendMediaToTelegram(threadId, buffer, fileName, caption = null, mediaType) {
         try {
-            const mimeType = mime.lookup(fileName) || 'application/octet-stream';
-            
             const options = {
                 message_thread_id: threadId,
                 caption: caption || undefined
             };
 
-            if (mimeType.startsWith('image/')) {
-                await this.bot.sendPhoto(this.groupId, buffer, options);
-            } else if (mimeType.startsWith('video/')) {
-                await this.bot.sendVideo(this.groupId, buffer, options);
-            } else if (mimeType.startsWith('audio/')) {
-                await this.bot.sendAudio(this.groupId, buffer, options);
-            } else {
-                options.filename = fileName;
-                await this.bot.sendDocument(this.groupId, buffer, options);
+            switch (mediaType) {
+                case 'image':
+                    await this.bot.sendPhoto(this.groupId, buffer, options);
+                    break;
+                case 'video':
+                    await this.bot.sendVideo(this.groupId, buffer, options);
+                    break;
+                case 'audio':
+                    await this.bot.sendAudio(this.groupId, buffer, options);
+                    break;
+                case 'sticker':
+                    // Convert webp to png for better compatibility
+                    try {
+                        const pngBuffer = await sharp(buffer).png().toBuffer();
+                        await this.bot.sendPhoto(this.groupId, pngBuffer, options);
+                    } catch (conversionError) {
+                        // Fallback to document if conversion fails
+                        options.filename = fileName;
+                        await this.bot.sendDocument(this.groupId, buffer, options);
+                    }
+                    break;
+                default:
+                    options.filename = fileName;
+                    await this.bot.sendDocument(this.groupId, buffer, options);
             }
         } catch (error) {
             logger.error('Error sending media to Telegram:', error);
@@ -467,16 +366,13 @@ class TelegramBridge {
 
             // Find corresponding WhatsApp user
             const userTopic = this.findUserTopicByThreadId(msg.message_thread_id);
-            if (!userTopic) {
-                // Check if it's a status reply
-                if (msg.message_thread_id === this.topics.statusUpdates?.id) {
-                    await this.handleStatusReply(msg);
-                }
-                return;
+            if (userTopic) {
+                // Send to WhatsApp
+                await this.sendToWhatsApp(userTopic.jid, msg);
+            } else if (msg.message_thread_id === this.topics.statusUpdates?.id) {
+                // Handle status reply
+                await this.handleStatusReply(msg);
             }
-
-            // Send to WhatsApp
-            await this.sendToWhatsApp(userTopic.jid, msg);
 
         } catch (error) {
             logger.error('Error handling Telegram message:', error);
@@ -537,7 +433,7 @@ class TelegramBridge {
             
             // Send error message back to Telegram
             await this.bot.sendMessage(this.groupId, 
-                `❌ Failed to send message to WhatsApp: ${error.message}`, {
+                `❌ Failed to send message: ${error.message}`, {
                 message_thread_id: telegramMsg.message_thread_id
             });
         }
@@ -560,10 +456,21 @@ class TelegramBridge {
         try {
             if (!this.topics.callLogs) return;
 
-            const callInfo = await this.formatCallInfo(call);
+            // Create unique call ID to prevent duplicates
+            const callId = `${call.from}_${call.id}_${Date.now()}`;
+            if (this.callTracker.has(callId)) return;
+            
+            this.callTracker.add(callId);
+            
+            // Clean up old call IDs (keep only last 100)
+            if (this.callTracker.size > 100) {
+                const oldIds = Array.from(this.callTracker).slice(0, 50);
+                oldIds.forEach(id => this.callTracker.delete(id));
+            }
+
+            const callInfo = this.formatCallInfo(call);
             await this.bot.sendMessage(this.groupId, callInfo, {
-                message_thread_id: this.topics.callLogs.id,
-                parse_mode: 'Markdown'
+                message_thread_id: this.topics.callLogs.id
             });
 
             logger.info(`📞 Call logged: ${call.from} - ${call.status}`);
@@ -572,30 +479,34 @@ class TelegramBridge {
         }
     }
 
-    async formatCallInfo(call) {
-        const timestamp = new Date().toLocaleString();
+    formatCallInfo(call) {
         const caller = call.from.split('@')[0];
-        const callType = call.isVideo ? '📹 Video Call' : '📞 Voice Call';
-        const status = call.status === 'offer' ? 'Incoming' : 
-                      call.status === 'accept' ? 'Accepted' : 
-                      call.status === 'reject' ? 'Rejected' : 
-                      call.status === 'timeout' ? 'Missed' : call.status;
+        const callType = call.isVideo ? '📹' : '📞';
+        const status = call.status === 'offer' ? 'Incoming call' : 
+                      call.status === 'accept' ? 'Call accepted' : 
+                      call.status === 'reject' ? 'Call rejected' : 
+                      call.status === 'timeout' ? 'Missed call' : call.status;
 
-        return `${callType}\n\n` +
-               `👤 **Caller:** +${caller}\n` +
-               `📊 **Status:** ${status}\n` +
-               `🕐 **Time:** ${timestamp}\n` +
-               `⏱️ **Duration:** ${call.duration || 'N/A'}`;
+        return `${callType} ${status} from +${caller}`;
     }
 
     async handleWhatsAppStatus(msg) {
         try {
             if (!this.topics.statusUpdates) return;
 
-            const statusInfo = await this.formatStatusInfo(msg);
-            const sentMsg = await this.bot.sendMessage(this.groupId, statusInfo, {
-                message_thread_id: this.topics.statusUpdates.id,
-                parse_mode: 'Markdown'
+            const sender = msg.key.participant?.split('@')[0] || 'Unknown';
+            const text = msg.message?.conversation || 
+                        msg.message?.extendedTextMessage?.text || 
+                        msg.message?.imageMessage?.caption ||
+                        msg.message?.videoMessage?.caption || '';
+
+            let statusText = `📱 Status from +${sender}`;
+            if (text) {
+                statusText += `\n\n${text}`;
+            }
+
+            const sentMsg = await this.bot.sendMessage(this.groupId, statusText, {
+                message_thread_id: this.topics.statusUpdates.id
             });
 
             // Store status message mapping for replies
@@ -613,30 +524,6 @@ class TelegramBridge {
         }
     }
 
-    async formatStatusInfo(msg) {
-        const timestamp = new Date(msg.messageTimestamp * 1000).toLocaleString();
-        const sender = msg.pushName || msg.key.participant?.split('@')[0] || 'Unknown';
-        const text = msg.message?.conversation || 
-                    msg.message?.extendedTextMessage?.text || 
-                    msg.message?.imageMessage?.caption ||
-                    msg.message?.videoMessage?.caption || '';
-
-        let statusContent = '';
-        if (msg.message?.imageMessage) {
-            statusContent = '🖼️ *Image Status*';
-        } else if (msg.message?.videoMessage) {
-            statusContent = '🎥 *Video Status*';
-        } else if (text) {
-            statusContent = `📝 *Text Status*\n\n${text}`;
-        }
-
-        return `📱 **Status Update**\n\n` +
-               `👤 **From:** ${sender}\n` +
-               `🕐 **Time:** ${timestamp}\n\n` +
-               `${statusContent}\n\n` +
-               `💬 *Reply to this message to respond on WhatsApp*`;
-    }
-
     async handleStatusReply(telegramMsg) {
         try {
             if (!telegramMsg.reply_to_message) return;
@@ -644,7 +531,7 @@ class TelegramBridge {
             const statusData = this.userCache.get(`status_${telegramMsg.reply_to_message.message_id}`);
             if (!statusData) {
                 await this.bot.sendMessage(this.groupId, 
-                    '❌ Cannot find original status message to reply to', {
+                    '❌ Cannot find original status message', {
                     message_thread_id: telegramMsg.message_thread_id
                 });
                 return;
@@ -652,7 +539,7 @@ class TelegramBridge {
 
             // Send reply to WhatsApp status
             await this.whatsappBot.sendMessage(statusData.sender, {
-                text: `📱 *Status Reply:* ${telegramMsg.text}`
+                text: telegramMsg.text
             });
 
             await this.bot.sendMessage(this.groupId, 
@@ -671,7 +558,7 @@ class TelegramBridge {
             if (!userTopic) return;
 
             await this.bot.sendMessage(this.groupId, 
-                '📸 *Profile picture updated*', {
+                '📸 Profile picture updated', {
                 message_thread_id: userTopic.id
             });
 
@@ -686,7 +573,6 @@ class TelegramBridge {
     async handleCallbackQuery(query) {
         try {
             await this.bot.answerCallbackQuery(query.id);
-            // Handle any inline button callbacks here
         } catch (error) {
             logger.error('Error handling callback query:', error);
         }
