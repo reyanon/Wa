@@ -42,7 +42,6 @@ class TelegramBridge {
             
             await this.setupTelegramHandlers();
             logger.info('✅ Telegram bridge initialized');
-            this.setupTypingDetection(); 
         } catch (error) {
             logger.error('❌ Failed to initialize Telegram bridge:', error);
         }
