@@ -37,6 +37,7 @@ class Config {
                 chatId: '-1002287300661',
                 adminIds: [7580382614],
                 sudoUsers: [7580382614],
+                autoSyncContacts: true, // Enable/disable automatic contact syncing and topic name updates
                 features: {
                     topics: true,
                     mediaSync: true,
