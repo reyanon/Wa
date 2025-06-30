@@ -1,17 +1,18 @@
-
 const path = require('path');
 const fs = require('fs-extra');
-const logger = require('./logger');
+const logger = require('../core/logger'); // Adjusted path based on typical project structure
 
 class ModuleLoader {
     constructor(bot) {
         this.bot = bot;
         this.modules = new Map();
+        this.systemModulesCount = 0;
+        this.customModulesCount = 0;
     }
 
     async loadModules() {
         const systemPath = path.join(__dirname, '../modules');
-        const customPath = path.join(__dirname, '../custom_modules');
+        const customPath = path.join(__dirname, '../custom_modules'); // Assuming this is the custom modules folder
 
         await fs.ensureDir(systemPath);
         await fs.ensureDir(customPath);
@@ -20,6 +21,9 @@ class ModuleLoader {
             fs.readdir(systemPath),
             fs.readdir(customPath)
         ]);
+
+        this.systemModulesCount = 0; // Reset counts for fresh load
+        this.customModulesCount = 0; // Reset counts for fresh load
 
         for (const file of systemFiles) {
             if (file.endsWith('.js')) {
@@ -33,10 +37,9 @@ class ModuleLoader {
             }
         }
 
-        const validCount = [...this.modules.values()].filter(m => m.status === 'valid').length;
-        const partialCount = [...this.modules.values()].filter(m => m.status === 'partial').length;
-
-        logger.info(`✅ Loaded ${validCount} valid modules, ${partialCount} partially valid.`);
+        logger.info(`✅ Loaded ${this.systemModulesCount} System Modules.`);
+        logger.info(`✅ Loaded ${this.customModulesCount} Custom Modules.`);
+        logger.info(`✅ Total Modules Loaded: ${this.systemModulesCount + this.customModulesCount}`);
     }
 
     async loadModule(filePath, isSystem) {
@@ -46,50 +49,52 @@ class ModuleLoader {
             delete require.cache[require.resolve(filePath)];
             const mod = require(filePath);
 
-            if (!mod || typeof mod !== 'object') {
-                logger.warn(`❌ ${isSystem ? 'System' : 'Custom'} module '${moduleId}' does not export a valid object.`);
-                return;
+            // If the module exports a class, instantiate it. Otherwise, assume it's a direct object.
+            const moduleInstance = typeof mod === 'function' && /^\s*class\s/.test(mod.toString()) 
+                                   ? new mod(this.bot) 
+                                   : mod;
+
+            // Use module's own name if available, for better logging
+            const actualModuleId = (moduleInstance && moduleInstance.name) ? moduleInstance.name : moduleId;
+
+            // Initialize module if it has an init method
+            if (moduleInstance.init && typeof moduleInstance.init === 'function') {
+                await moduleInstance.init();
             }
 
-            const status = this.checkModuleStructure(mod, moduleId, isSystem);
-
-            if (mod.init) await mod.init();
-            if (mod.commands) {
-                for (const cmd of mod.commands) {
+            // Register commands if they exist and are an array
+            if (Array.isArray(moduleInstance.commands)) {
+                for (const cmd of moduleInstance.commands) {
                     this.bot.messageHandler.registerCommandHandler(cmd.name, cmd);
                 }
             }
-            if (mod.messageHooks) {
-                for (const [hook, fn] of Object.entries(mod.messageHooks)) {
-                    this.bot.messageHandler.registerMessageHook(hook, fn.bind(mod));
+
+            // Register messageHooks if they exist and are an object
+            if (moduleInstance.messageHooks && typeof moduleInstance.messageHooks === 'object' && moduleInstance.messageHooks !== null) {
+                for (const [hook, fn] of Object.entries(moduleInstance.messageHooks)) {
+                    this.bot.messageHandler.registerMessageHook(hook, fn.bind(moduleInstance));
                 }
             }
 
-            this.modules.set(moduleId, {
-                instance: mod,
+            this.modules.set(actualModuleId, {
+                instance: moduleInstance,
                 path: filePath,
-                isSystem,
-                status
+                isSystem
             });
 
-            logger.info(`✅ Loaded ${isSystem ? 'System' : 'Custom'} module: ${moduleId} (${status})`);
+            if (isSystem) {
+                this.systemModulesCount++;
+            } else {
+                this.customModulesCount++;
+            }
+
+            logger.info(`✅ Loaded ${isSystem ? 'System' : 'Custom'} module: ${actualModuleId}`);
         } catch (err) {
-            logger.error(`❌ Failed to load module '${moduleId}':`, err);
+            logger.error(`❌ Failed to load module '${moduleId}' from ${filePath}:`, err);
         }
     }
 
-    checkModuleStructure(mod, moduleId, isSystem) {
-        const missing = [];
-        if (!mod.name) missing.push('name');
-        if (!mod.version) missing.push('version');
-        if (!mod.commands && !mod.messageHooks) missing.push('commands/messageHooks');
-
-        if (missing.length > 0) {
-            logger.warn(`⚠️ ${isSystem ? 'System' : 'Custom'} module '${moduleId}' missing: ${missing.join(', ')}`);
-        }
-
-        return missing.length === 0 ? 'valid' : 'partial';
-    }
+    // Removed checkModuleStructure as requested
 
     getModule(name) {
         return this.modules.get(name)?.instance || null;
@@ -97,6 +102,48 @@ class ModuleLoader {
 
     listModules() {
         return [...this.modules.keys()];
+    }
+
+    async unloadModule(moduleId) {
+        const moduleInfo = this.modules.get(moduleId);
+        if (!moduleInfo) {
+            throw new Error(`Module ${moduleId} not found`);
+        }
+
+        // Call destroy method if it exists for cleanup
+        if (moduleInfo.instance.destroy && typeof moduleInfo.instance.destroy === 'function') {
+            await moduleInfo.instance.destroy();
+        }
+
+        // Unregister commands/hooks (you might need more sophisticated unregistration in messageHandler)
+        if (Array.isArray(moduleInfo.instance.commands)) {
+            for (const cmd of moduleInfo.instance.commands) {
+                if (cmd.name) { // Basic check for command name
+                    this.bot.messageHandler.unregisterCommandHandler(cmd.name); // Assuming this method exists
+                }
+            }
+        }
+        if (moduleInfo.instance.messageHooks && typeof moduleInfo.instance.messageHooks === 'object') {
+            for (const hook of Object.keys(moduleInfo.instance.messageHooks)) {
+                this.bot.messageHandler.unregisterMessageHook(hook); // Assuming this method exists
+            }
+        }
+
+        this.modules.delete(moduleId);
+        delete require.cache[moduleInfo.path];
+        logger.info(`🚫 Unloaded module: ${moduleId}`);
+    }
+
+    async reloadModule(moduleId) {
+        const moduleInfo = this.modules.get(moduleId);
+        if (!moduleInfo) {
+            throw new Error(`Module ${moduleId} not found for reloading`);
+        }
+        
+        logger.info(`🔄 Reloading module: ${moduleId}`);
+        await this.unloadModule(moduleId); // Unload first
+        await this.loadModule(moduleInfo.path, moduleInfo.isSystem); // Then load again
+        logger.info(`✅ Reloaded module: ${moduleId}`);
     }
 }
 
