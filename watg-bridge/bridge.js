@@ -240,19 +240,36 @@ class TelegramBridge {
 
     async syncContacts() {
         try {
+            if (!this.whatsappBot) {
+                logger.error('❌ WhatsApp bot instance not available for contact sync');
+                return;
+            }
+
+            // Retry logic for socket availability
+            let retryCount = 0;
+            const maxRetries = 3;
+            while (!this.whatsappBot.sock && retryCount < maxRetries) {
+                logger.warn(`⚠️ WhatsApp socket not available, retrying (${retryCount + 1}/${maxRetries})...`);
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+                await this.whatsappBot.connect(); // Attempt to reconnect
+                retryCount++;
+            }
+
             if (!this.whatsappBot.sock) {
-                logger.error('❌ WhatsApp socket not available for contact sync');
+                logger.error('❌ WhatsApp socket not available after retries for contact sync');
+                await this.logToTelegram('⚠️ Contact Sync Failed', 'WhatsApp socket not available after multiple retries.');
                 return;
             }
             
             logger.info('📞 Syncing contacts...');
-            logger.debug('🔍 Checking WhatsApp connection:', this.whatsappBot.sock.user ? 'Connected' : 'Disconnected');
+            logger.debug('🔍 WhatsApp connection status:', this.whatsappBot.sock.user ? `Connected (${this.whatsappBot.sock.user.id})` : 'Disconnected');
             
             const contacts = await this.whatsappBot.sock.getContacts();
             logger.debug(`🔍 Retrieved ${contacts?.length || 0} contacts from WhatsApp`);
             
             if (!Array.isArray(contacts)) {
                 logger.error('❌ Contacts data is not an array:', contacts);
+                await this.logToTelegram('⚠️ Contact Sync Failed', 'Invalid contact data received from WhatsApp.');
                 return;
             }
 
@@ -274,11 +291,13 @@ class TelegramBridge {
             }
             
             logger.info(`✅ Synced ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
+            await this.logToTelegram('✅ Contact Sync Complete', `Synced ${syncedCount} new/updated contacts. Total: ${this.contactMappings.size}`);
             if (config.get('telegram.autoSyncContacts') !== false) {
                 await this.updateTopicNames();
             }
         } catch (error) {
             logger.error('❌ Failed to sync contacts:', error);
+            await this.logToTelegram('❌ Contact Sync Failed', `Error: ${error.message}`);
         }
     }
 
@@ -312,8 +331,10 @@ class TelegramBridge {
             }
             
             logger.info(`✅ Updated ${updatedCount} topic names`);
+            await this.logToTelegram('✅ Topic Names Updated', `Updated ${updatedCount} topic names.`);
         } catch (error) {
             logger.error('❌ Failed to update topic names:', error);
+            await this.logToTelegram('❌ Topic Names Update Failed', `Error: ${error.message}`);
         }
     }
 
@@ -490,10 +511,8 @@ class TelegramBridge {
                 iconColor = 0x6FB9F0;
             } else {
                 const phone = chatJid.split('@')[0];
-                const contactName = this.contactMappings.get(phone);
-                const participant = whatsappMsg.key.participant || chatJid;
-                const userInfo = this.userMappings.get(participant);
-                topicName = contactName || `+${phone}`;
+                const contactName = this.contactMappings.get(phone) || `+${phone}`;
+                topicName = contactName;
             }
 
             const topic = await this.telegramBot.createForumTopic(chatId, topicName, {
@@ -1269,7 +1288,10 @@ class TelegramBridge {
     }
 
     async setupWhatsAppHandlers() {
-        if (!this.whatsappBot.sock) return;
+        if (!this.whatsappBot.sock) {
+            logger.warn('⚠️ WhatsApp socket not available for setting up handlers');
+            return;
+        }
 
         this.whatsappBot.sock.ev.on('call', async (calls) => {
             for (const call of calls) {
@@ -1306,8 +1328,10 @@ class TelegramBridge {
                     }
                 }
                 logger.info(`✅ Processed ${updatedCount} contact updates`);
+                await this.logToTelegram('✅ Contact Updates Processed', `Updated ${updatedCount} contacts.`);
             } catch (error) {
                 logger.error('❌ Failed to process contact updates:', error);
+                await this.logToTelegram('❌ Contact Updates Failed', `Error: ${error.message}`);
             }
         });
 
