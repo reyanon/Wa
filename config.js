@@ -33,7 +33,7 @@ class Config {
             },
             telegram: {
                 enabled: true,
-                botToken: '7616181573:AAGpdqTwQcepXKXq72x58RABIZbvbE-NXKg',
+                botToken: '7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI',
                 chatId: '-1002287300661',
                 adminIds: [7580382614],
                 sudoUsers: [7580382614],
