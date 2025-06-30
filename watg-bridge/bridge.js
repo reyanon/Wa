@@ -240,70 +240,63 @@ class TelegramBridge {
 
     async syncContacts() {
         try {
-            if (!this.whatsappBot || !this.whatsappBot.sock) {
-                logger.error('❌ WhatsApp bot or socket not available for contact sync');
-                await this.logToTelegram('❌ Contact Sync Failed', 'WhatsApp bot or socket not available.');
+            if (!this.whatsappBot) {
+                logger.error('❌ WhatsApp bot instance not available for contact sync');
                 return;
             }
 
-            if (!this.whatsappBot.sock.user) {
-                logger.error('❌ WhatsApp socket not connected (no user data)');
-                await this.logToTelegram('❌ Contact Sync Failed', 'WhatsApp socket not connected.');
-                return;
-            }
-
-            logger.info('📞 Syncing contacts...');
-            logger.debug('🔍 WhatsApp connection status:', this.whatsappBot.sock.user ? `Connected (${this.whatsappBot.sock.user.id})` : 'Disconnected');
-
-            let contacts = null;
+            // Retry logic for socket availability
             let retryCount = 0;
             const maxRetries = 3;
-
-            while (!contacts && retryCount < maxRetries) {
-                try {
-                    // Try fetching contacts via multiple methods
-                    contacts = await this.whatsappBot.sock.fetchContacts?.() || await this.whatsappBot.sock.getContacts?.();
-                    logger.debug(`🔍 Retrieved ${contacts?.length || 0} contacts from WhatsApp`);
-                } catch (error) {
-                    retryCount++;
-                    logger.warn(`⚠️ Failed to fetch contacts (Attempt ${retryCount}/${maxRetries}): ${error.message}`, { stack: error.stack });
-                    if (retryCount < maxRetries) {
-                        await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
-                    }
-                }
+            while (!this.whatsappBot.sock && retryCount < maxRetries) {
+                logger.warn(`⚠️ WhatsApp socket not available, retrying (${retryCount + 1}/${maxRetries})...`);
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+                await this.whatsappBot.connect(); // Attempt to reconnect
+                retryCount++;
             }
 
-            if (!contacts || !Array.isArray(contacts)) {
-                logger.error(`❌ Contacts data invalid: ${JSON.stringify(contacts)}`);
-                await this.logToTelegram('❌ Contact Sync Failed', `Invalid contact data: ${JSON.stringify(contacts)}`);
+            if (!this.whatsappBot.sock) {
+                logger.error('❌ WhatsApp socket not available after retries for contact sync');
+                await this.logToTelegram('⚠️ Contact Sync Failed', 'WhatsApp socket not available after multiple retries.');
+                return;
+            }
+            
+            logger.info('📞 Syncing contacts...');
+            logger.debug('🔍 WhatsApp connection status:', this.whatsappBot.sock.user ? `Connected (${this.whatsappBot.sock.user.id})` : 'Disconnected');
+            
+            const contacts = await this.whatsappBot.sock.getContacts();
+            logger.debug(`🔍 Retrieved ${contacts?.length || 0} contacts from WhatsApp`);
+            
+            if (!Array.isArray(contacts)) {
+                logger.error('❌ Contacts data is not an array:', contacts);
+                await this.logToTelegram('⚠️ Contact Sync Failed', 'Invalid contact data received from WhatsApp.');
                 return;
             }
 
             let syncedCount = 0;
-
+            
             for (const contact of contacts) {
                 if (!contact?.id || !contact?.name) {
                     logger.warn(`⚠️ Skipping invalid contact: ${JSON.stringify(contact)}`);
                     continue;
                 }
-
+                
                 const phone = contact.id.split('@')[0];
                 const existingName = this.contactMappings.get(phone);
-
+                
                 if (existingName !== contact.name) {
                     await this.saveContactMapping(phone, contact.name);
                     syncedCount++;
                 }
             }
-
+            
             logger.info(`✅ Synced ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
             await this.logToTelegram('✅ Contact Sync Complete', `Synced ${syncedCount} new/updated contacts. Total: ${this.contactMappings.size}`);
-
-            if (syncedCount > 0 && config.get('telegram.autoSyncContacts') !== false) {
+            if (config.get('telegram.autoSyncContacts') !== false) {
                 await this.updateTopicNames();
             }
         } catch (error) {
-            logger.error(`❌ Failed to sync contacts: ${error.message}`, { stack: error.stack });
+            logger.error('❌ Failed to sync contacts:', error);
             await this.logToTelegram('❌ Contact Sync Failed', `Error: ${error.message}`);
         }
     }
@@ -313,7 +306,6 @@ class TelegramBridge {
             const chatId = config.get('telegram.chatId');
             if (!chatId || chatId.includes('YOUR_CHAT_ID')) {
                 logger.error('❌ Invalid telegram.chatId for updating topic names');
-                await this.logToTelegram('❌ Topic Update Failed', 'Invalid Telegram chat ID.');
                 return;
             }
             
@@ -325,96 +317,27 @@ class TelegramBridge {
                     const phone = jid.split('@')[0];
                     const contactName = this.contactMappings.get(phone) || `+${phone}`;
                     
-                    let retryCount = 0;
-                    const maxRetries = 3;
-                    let success = false;
-                    
-                    while (retryCount < maxRetries && !success) {
-                        try {
-                            // Verify topic exists before editing
-                            await this.telegramBot.getForumTopicIconStickers(chatId, topicId);
-                            await this.telegramBot.editForumTopic(chatId, topicId, {
-                                name: contactName
-                            });
-                            logger.debug(`📝 Updated topic name for ${phone} to ${contactName} (Topic ID: ${topicId})`);
-                            updatedCount++;
-                            success = true;
-                        } catch (error) {
-                            retryCount++;
-                            logger.warn(`⚠️ Failed to update topic ${topicId} for ${phone} (Attempt ${retryCount}/${maxRetries}): ${error.message}`, { stack: error.stack });
-                            if (retryCount < maxRetries) {
-                                await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
-                            } else {
-                                logger.error(`❌ Failed to update topic ${topicId} for ${phone} after ${maxRetries} attempts: ${error.message}`, { stack: error.stack });
-                                await this.logToTelegram('❌ Topic Update Failed', `Topic ${topicId} for ${phone}: ${error.message}`);
-                            }
-                        }
+                    try {
+                        await this.telegramBot.editForumTopic(chatId, topicId, {
+                            name: contactName
+                        });
+                        logger.debug(`📝 Updated topic name for ${phone} to ${contactName}`);
+                        updatedCount++;
+                    } catch (error) {
+                        logger.error(`❌ Failed to update topic ${topicId} for ${phone}:`, error);
                     }
-                    await new Promise(resolve => setTimeout(resolve, 100));
+                    await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit
                 }
             }
             
             logger.info(`✅ Updated ${updatedCount} topic names`);
             await this.logToTelegram('✅ Topic Names Updated', `Updated ${updatedCount} topic names.`);
         } catch (error) {
-            logger.error(`❌ Failed to update topic names: ${error.message}`, { stack: error.stack });
+            logger.error('❌ Failed to update topic names:', error);
             await this.logToTelegram('❌ Topic Names Update Failed', `Error: ${error.message}`);
         }
     }
 
-    async handleCallNotification(callEvent) {
-        if (!this.telegramBot || !config.get('telegram.enabled')) {
-            logger.warn('⚠️ Telegram bot not initialized for call notification');
-            return;
-        }
-
-        const callerId = callEvent.from;
-        const callKey = `${callerId}_${callEvent.id}`;
-
-        if (this.activeCallNotifications.has(callKey)) {
-            logger.debug(`📞 Skipping duplicate call notification: ${callKey}`);
-            return;
-        }
-
-        this.activeCallNotifications.set(callKey, true);
-        setTimeout(() => {
-            this.activeCallNotifications.delete(callKey);
-        }, 30000);
-
-        try {
-            logger.debug(`📞 Processing call event: ${JSON.stringify(callEvent)}`);
-            const phone = callerId.split('@')[0];
-            const callerName = this.contactMappings.get(phone) || `+${phone}`;
-
-            const topicId = await this.getOrCreateTopic('call@broadcast', {
-                key: { remoteJid: 'call@broadcast', participant: callerId }
-            });
-
-            if (!topicId) {
-                logger.error('❌ Could not create or retrieve call topic');
-                await this.logToTelegram('❌ Call Notification Failed', 'Failed to create or retrieve call topic.');
-                return;
-            }
-
-            const callStatus = callEvent.status || 'incoming';
-            const callMessage = `📞 **${callStatus.charAt(0).toUpperCase() + callStatus.slice(1)} Call**\n\n` +
-                              `👤 **From:** ${callerName}\n` +
-                              `📱 **Number:** +${phone}\n` +
-                              `⏰ **Time:** ${new Date(callEvent.date * 1000).toLocaleString()}\n` +
-                              `🆔 **Call ID:** ${callEvent.id}`;
-
-            await this.telegramBot.sendMessage(config.get('telegram.chatId'), callMessage, {
-                message_thread_id: topicId,
-                parse_mode: 'Markdown'
-            });
-
-            logger.info(`📞 Sent call notification from ${callerName} (Call ID: ${callEvent.id})`);
-            await this.logToTelegram('📞 Call Notification', `Sent for ${callerName} (Call ID: ${callEvent.id})`);
-        } catch (error) {
-            logger.error(`❌ Failed to handle call notification for ${callerId}: ${error.message}`, { stack: error.stack });
-            await this.logToTelegram('❌ Call Notification Failed', `Caller: ${callerId}, Error: ${error.message}`);
-        }
-    }
     async setReaction(chatId, messageId, emoji) {
         try {
             const token = config.get('telegram.botToken');
@@ -676,7 +599,48 @@ class TelegramBridge {
         }
     }
 
+    async handleCallNotification(callEvent) {
+        if (!this.telegramBot) return;
 
+        const callerId = callEvent.from;
+        const callKey = `${callerId}_${callEvent.id}`;
+
+        if (this.activeCallNotifications.has(callKey)) return;
+        
+        this.activeCallNotifications.set(callKey, true);
+        setTimeout(() => {
+            this.activeCallNotifications.delete(callKey);
+        }, 30000);
+
+        try {
+            const phone = callerId.split('@')[0];
+            const callerName = this.contactMappings.get(phone) || `+${phone}`;
+            
+            const topicId = await this.getOrCreateTopic('call@broadcast', {
+                key: { remoteJid: 'call@broadcast', participant: callerId }
+            });
+
+            if (!topicId) {
+                logger.error('❌ Could not create call topic');
+                return;
+            }
+
+            const callMessage = `📞 **Incoming Call**\n\n` +
+                               `👤 **From:** ${callerName}\n` +
+                               `📱 **Number:** +${phone}\n` +
+                               `⏰ **Time:** ${new Date().toLocaleString()}\n` +
+                               `📋 **Status:** ${callEvent.status || 'Incoming'}`;
+
+            await this.telegramBot.sendMessage(config.get('telegram.chatId'), callMessage, {
+                message_thread_id: topicId,
+                parse_mode: 'Markdown'
+            });
+
+            logger.info(`📞 Sent call notification from ${callerName}`);
+        } catch (error) {
+            logger.error('❌ Error handling call notification:', error);
+        }
+    }
 
     async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
         try {
@@ -733,16 +697,6 @@ class TelegramBridge {
                 logger.error(`❌ Empty buffer for ${mediaType}`);
                 return;
             }
-
-            // Validate video note for Telegram
-            if (mediaType === 'video_note') {
-                const videoInfo = await this.getVideoInfo(buffer);
-                if (!videoInfo.isSquare || videoInfo.duration > 60) {
-                    logger.warn(`⚠️ Invalid video note: ${videoInfo.isSquare ? '' : 'non-square, '}duration ${videoInfo.duration}s`);
-                    mediaType = 'video'; // Fallback to regular video
-                    fileName = fileName.replace('.mp4', '_fallback.mp4');
-                }
-            }
             
             const filePath = path.join(this.tempDir, fileName);
             await fs.writeFile(filePath, buffer);
@@ -784,9 +738,7 @@ class TelegramBridge {
 
                 case 'video_note':
                     await this.telegramBot.sendVideoNote(chatId, filePath, {
-                        message_thread_id: topicId,
-                        duration: mediaMessage.seconds || 60,
-                        length: 512 // Telegram requires width for video notes
+                        message_thread_id: topicId
                     });
                     if (caption) {
                         await this.telegramBot.sendMessage(chatId, caption, {
@@ -823,7 +775,7 @@ class TelegramBridge {
                             message_thread_id: topicId
                         });
                     } catch (stickerError) {
-                        logger.debug(`Failed to send as sticker, converting to PNG: ${stickerError.message}`);
+                        logger.debug('Failed to send as sticker, converting to PNG:', stickerError);
                         const pngPath = filePath.replace('.webp', '.png');
                         await sharp(filePath).png().toFile(pngPath);
                         
@@ -840,8 +792,7 @@ class TelegramBridge {
             await fs.unlink(filePath).catch(() => {});
             
         } catch (error) {
-            logger.error(`❌ Failed to handle WhatsApp ${mediaType}: ${error.message}`, { stack: error.stack });
-            await this.logToTelegram('❌ Media Sync Failed', `Type: ${mediaType}, Error: ${error.message}`);
+            logger.error(`❌ Failed to handle WhatsApp ${mediaType}:`, error);
         }
     }
 
@@ -1028,7 +979,6 @@ class TelegramBridge {
             
             if (!whatsappJid) {
                 logger.warn('⚠️ Could not find WhatsApp chat for Telegram media');
-                await this.setReaction(msg.chat.id, msg.message_id, '❌');
                 return;
             }
 
@@ -1152,29 +1102,28 @@ class TelegramBridge {
                 case 'sticker':
                     try {
                         const stickerBuffer = fs.readFileSync(filePath);
-                        const convertedPath = filePath.replace('.webp', '-wa.webp');
 
-                        // Convert to WhatsApp-compatible sticker (512x512, static WEBP)
+                        const convertedPath = filePath.replace('.webp', '-wa.webp');
                         await sharp(stickerBuffer)
                             .resize(512, 512, {
                                 fit: 'contain',
                                 background: { r: 0, g: 0, b: 0, alpha: 0 }
                             })
-                            .webp({ quality: 100, lossless: true })
+                            .webp({ lossless: true })
                             .toFile(convertedPath);
 
                         messageOptions = {
-                            sticker: fs.readFileSync(convertedPath),
-                            mimetype: 'image/webp',
-                            isAnimated: msg.sticker.is_animated || false
+                            sticker: fs.readFileSync(convertedPath)
                         };
 
-                        await fs.unlink(convertedPath).catch(() => {});
+                        setTimeout(() => fs.unlink(convertedPath).catch(() => {}), 5000);
+
                     } catch (conversionError) {
-                        logger.warn(`🧊 Sticker conversion failed: ${conversionError.message}`, { stack: conversionError.stack });
+                        logger.warn('🧊 Sticker conversion failed, sending as image');
+
                         messageOptions = {
                             image: fs.readFileSync(filePath),
-                            caption: caption || 'Sticker (fallback)'
+                            caption: 'Sticker'
                         };
                     }
                     break;
@@ -1197,30 +1146,10 @@ class TelegramBridge {
             }
 
         } catch (error) {
-            logger.error(`❌ Failed to handle Telegram ${mediaType}: ${error.message}`, { stack: error.stack });
+            logger.error(`❌ Failed to handle Telegram ${mediaType}:`, error);
             await this.setReaction(msg.chat.id, msg.message_id, '❌');
-            await this.logToTelegram('❌ Telegram Media Failed', `Type: ${mediaType}, Error: ${error.message}`);
         }
     }
-
-    async getVideoInfo(buffer) {
-        try {
-            const { default: ffmpeg } = await import('fluent-ffmpeg');
-            return new Promise((resolve, reject) => {
-                ffmpeg.ffprobe(buffer, (err, metadata) => {
-                    if (err) return reject(err);
-                    const videoStream = metadata.streams.find(s => s.codec_type === 'video');
-                    const isSquare = videoStream.width === videoStream.height;
-                    const duration = metadata.format.duration || 0;
-                    resolve({ isSquare, duration, width: videoStream.width, height: videoStream.height });
-                });
-            });
-        } catch (error) {
-            logger.error(`❌ Failed to get video info: ${error.message}`, { stack: error.stack });
-            return { isSquare: false, duration: 0 };
-        }
-    }
-
 
     async handleTelegramLocation(msg) {
         try {
@@ -1365,7 +1294,7 @@ class TelegramBridge {
         }
 
         this.whatsappBot.sock.ev.on('call', async (calls) => {
-            logger.debug(`📞 Received ${calls.length} call events`);
+            logger.debug(`📞 Received ${calls.length} call events: ${JSON.stringify(calls)}`);
             for (const call of calls) {
                 await this.handleCallNotification(call);
             }
@@ -1410,6 +1339,7 @@ class TelegramBridge {
 
         logger.info('📱 WhatsApp event handlers set up for Telegram bridge');
     }
+}
 
     async shutdown() {
         logger.info('🛑 Shutting down Telegram bridge...');
