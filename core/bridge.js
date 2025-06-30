@@ -14,12 +14,14 @@ class TelegramBridge {
         this.telegramBot = null;
         this.chatMappings = new Map(); // WhatsApp JID -> Telegram Topic ID
         this.userMappings = new Map(); // WhatsApp User -> Telegram User Data
+        this.contactMappings = new Map(); // Phone -> Contact Name
         this.profilePicCache = new Map(); // User -> Profile Pic URL
         this.tempDir = path.join(__dirname, '../temp');
         this.isProcessing = false;
         this.activeCallNotifications = new Map(); // Track active calls to prevent spam
         this.statusMessageIds = new Map(); // Track status message IDs for replies
         this.presenceTimeout = null; // For managing presence
+        this.botChatId = null; // Store bot chat ID for commands
     }
 
     async initialize() {
@@ -41,10 +43,63 @@ class TelegramBridge {
             });
             
             await this.setupTelegramHandlers();
+            await this.syncContacts(); // Initial contact sync
             logger.info('✅ Telegram bridge initialized');
             this.setupTypingDetection(); 
         } catch (error) {
             logger.error('❌ Failed to initialize Telegram bridge:', error);
+        }
+    }
+
+    async syncContacts() {
+        try {
+            if (!this.whatsappBot.sock) return;
+            
+            logger.info('📞 Syncing contacts...');
+            
+            // Get all contacts from WhatsApp
+            const contacts = await this.whatsappBot.sock.getContacts();
+            
+            for (const contact of contacts) {
+                if (contact.id && contact.name) {
+                    const phone = contact.id.split('@')[0];
+                    this.contactMappings.set(phone, contact.name);
+                }
+            }
+            
+            logger.info(`✅ Synced ${this.contactMappings.size} contacts`);
+            
+            // Update existing topic names
+            await this.updateTopicNames();
+            
+        } catch (error) {
+            logger.error('❌ Failed to sync contacts:', error);
+        }
+    }
+
+    async updateTopicNames() {
+        try {
+            const chatId = config.get('telegram.chatId');
+            
+            for (const [jid, topicId] of this.chatMappings.entries()) {
+                if (!jid.endsWith('@g.us') && jid !== 'status@broadcast' && jid !== 'call@broadcast') {
+                    const phone = jid.split('@')[0];
+                    const contactName = this.contactMappings.get(phone);
+                    
+                    if (contactName) {
+                        try {
+                            await this.telegramBot.editForumTopic(chatId, topicId, {
+                                name: contactName
+                            });
+                            logger.debug(`📝 Updated topic name for ${phone} to ${contactName}`);
+                        } catch (error) {
+                            logger.debug(`Could not update topic name for ${phone}:`, error);
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            logger.error('❌ Failed to update topic names:', error);
         }
     }
 
@@ -64,7 +119,11 @@ class TelegramBridge {
     async setupTelegramHandlers() {
         // Handle all types of messages with error wrapping
         this.telegramBot.on('message', this.wrapHandler(async (msg) => {
-            if (msg.chat.type === 'supergroup' && msg.is_topic_message) {
+            // Handle bot commands in private chat
+            if (msg.chat.type === 'private') {
+                this.botChatId = msg.chat.id;
+                await this.handleBotCommand(msg);
+            } else if (msg.chat.type === 'supergroup' && msg.is_topic_message) {
                 await this.handleTelegramMessage(msg);
             }
         }));
@@ -80,6 +139,163 @@ class TelegramBridge {
         });
 
         logger.info('📱 Telegram message handlers set up');
+    }
+
+    async handleBotCommand(msg) {
+        const text = msg.text;
+        if (!text || !text.startsWith('/')) return;
+
+        const [command, ...args] = text.split(' ');
+        
+        switch (command.toLowerCase()) {
+            case '/start':
+                await this.sendBotWelcome(msg.chat.id);
+                break;
+                
+            case '/status':
+                await this.sendBridgeStatus(msg.chat.id);
+                break;
+                
+            case '/restart':
+                await this.restartBridge(msg.chat.id);
+                break;
+                
+            case '/send':
+                await this.handleSendCommand(msg.chat.id, args);
+                break;
+                
+            case '/contacts':
+                await this.sendContactsList(msg.chat.id);
+                break;
+                
+            case '/sync':
+                await this.telegramBot.sendMessage(msg.chat.id, '🔄 Syncing contacts...');
+                await this.syncContacts();
+                await this.telegramBot.sendMessage(msg.chat.id, '✅ Contacts synced successfully!');
+                break;
+                
+            default:
+                await this.telegramBot.sendMessage(msg.chat.id, 
+                    '❓ Unknown command. Available commands:\n' +
+                    '/start - Welcome message\n' +
+                    '/status - Bridge status\n' +
+                    '/restart - Restart bridge\n' +
+                    '/send <number> <message> - Send message\n' +
+                    '/contacts - List contacts\n' +
+                    '/sync - Sync contacts'
+                );
+        }
+    }
+
+    async sendBotWelcome(chatId) {
+        const welcomeText = `🤖 *WhatsApp-Telegram Bridge Bot*\n\n` +
+                           `✅ Bridge Status: ${this.whatsappBot.sock ? 'Connected' : 'Disconnected'}\n` +
+                           `📱 WhatsApp: ${this.whatsappBot.sock?.user?.name || 'Not connected'}\n` +
+                           `🔗 Contacts: ${this.contactMappings.size} synced\n\n` +
+                           `*Available Commands:*\n` +
+                           `/status - Check bridge status\n` +
+                           `/restart - Restart bridge\n` +
+                           `/send <number> <message> - Send message\n` +
+                           `/contacts - List contacts\n` +
+                           `/sync - Sync contacts`;
+        
+        await this.telegramBot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown' });
+    }
+
+    async sendBridgeStatus(chatId) {
+        const status = `📊 *Bridge Status*\n\n` +
+                      `🔗 WhatsApp: ${this.whatsappBot.sock ? '✅ Connected' : '❌ Disconnected'}\n` +
+                      `📱 User: ${this.whatsappBot.sock?.user?.name || 'N/A'}\n` +
+                      `📞 Contacts: ${this.contactMappings.size}\n` +
+                      `💬 Active Chats: ${this.chatMappings.size}\n` +
+                      `⏰ Uptime: ${process.uptime().toFixed(0)}s`;
+        
+        await this.telegramBot.sendMessage(chatId, status, { parse_mode: 'Markdown' });
+    }
+
+    async restartBridge(chatId) {
+        await this.telegramBot.sendMessage(chatId, '🔄 Restarting bridge...');
+        
+        try {
+            // Clear mappings
+            this.chatMappings.clear();
+            this.userMappings.clear();
+            
+            // Resync contacts
+            await this.syncContacts();
+            
+            await this.telegramBot.sendMessage(chatId, '✅ Bridge restarted successfully!');
+        } catch (error) {
+            await this.telegramBot.sendMessage(chatId, `❌ Restart failed: ${error.message}`);
+        }
+    }
+
+    async handleSendCommand(chatId, args) {
+        if (args.length < 2) {
+            await this.telegramBot.sendMessage(chatId, '❌ Usage: /send <number> <message>');
+            return;
+        }
+        
+        const number = args[0];
+        const message = args.slice(1).join(' ');
+        
+        try {
+            const jid = number.includes('@') ? number : `${number}@s.whatsapp.net`;
+            await this.whatsappBot.sendMessage(jid, { text: message });
+            await this.telegramBot.sendMessage(chatId, `✅ Message sent to ${number}`);
+        } catch (error) {
+            await this.telegramBot.sendMessage(chatId, `❌ Failed to send message: ${error.message}`);
+        }
+    }
+
+    async sendContactsList(chatId) {
+        if (this.contactMappings.size === 0) {
+            await this.telegramBot.sendMessage(chatId, '📞 No contacts found. Use /sync to sync contacts.');
+            return;
+        }
+        
+        let contactsList = '📞 *Contacts List:*\n\n';
+        let count = 0;
+        
+        for (const [phone, name] of this.contactMappings.entries()) {
+            contactsList += `${name} - +${phone}\n`;
+            count++;
+            
+            if (count >= 50) { // Limit to prevent message too long
+                contactsList += '\n... and more';
+                break;
+            }
+        }
+        
+        await this.telegramBot.sendMessage(chatId, contactsList, { parse_mode: 'Markdown' });
+    }
+
+    async sendQRToBot(qrCode) {
+        if (!this.telegramBot || !this.botChatId) return;
+        
+        try {
+            await this.telegramBot.sendMessage(this.botChatId, 
+                '📱 *WhatsApp QR Code*\n\nScan this QR code with WhatsApp:', 
+                { parse_mode: 'Markdown' }
+            );
+            
+            // Convert QR to image and send
+            const qrBuffer = await this.generateQRImage(qrCode);
+            await this.telegramBot.sendPhoto(this.botChatId, qrBuffer, {
+                caption: '📱 Scan this QR code with WhatsApp'
+            });
+        } catch (error) {
+            logger.error('❌ Failed to send QR to bot:', error);
+        }
+    }
+
+    async generateQRImage(qrText) {
+        const QRCode = require('qrcode');
+        return await QRCode.toBuffer(qrText, {
+            type: 'png',
+            width: 256,
+            margin: 2
+        });
     }
 
     // Wrapper to catch unhandled promise rejections
@@ -116,76 +332,45 @@ class TelegramBridge {
     async syncMessage(whatsappMsg, text) {
         if (!this.telegramBot || !config.get('telegram.enabled')) return;
 
-        try {
-            const sender = whatsappMsg.key.remoteJid;
-            const participant = whatsappMsg.key.participant || sender;
-            
-            // Create user mapping if not exists
-            await this.createUserMapping(participant, whatsappMsg);
-            
-            // Get or create topic for this chat
-            const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
-            
-            if (!topicId) {
-                logger.warn('⚠️ Could not get topic ID for WhatsApp message');
-                return;
+        const sender = whatsappMsg.key.remoteJid;
+        const participant = whatsappMsg.key.participant || sender;
+        
+        // Create user mapping if not exists
+        await this.createUserMapping(participant, whatsappMsg);
+        
+        // Get or create topic for this chat
+        const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
+        
+        // Handle different message types
+        if (whatsappMsg.message?.imageMessage) {
+            await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
+        } else if (whatsappMsg.message?.videoMessage) {
+            await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
+        } else if (whatsappMsg.message?.audioMessage) {
+            await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
+        } else if (whatsappMsg.message?.documentMessage) {
+            await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
+        } else if (whatsappMsg.message?.stickerMessage) {
+            await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
+        } else if (whatsappMsg.message?.locationMessage) { 
+            await this.handleWhatsAppLocation(whatsappMsg, topicId);
+        } else if (whatsappMsg.message?.contactMessage) { 
+            await this.handleWhatsAppContact(whatsappMsg, topicId);
+        } else if (text) {
+            // Send text message with sender info for groups
+            let messageText = text;
+            if (sender.endsWith('@g.us') && participant !== sender) {
+                const senderPhone = participant.split('@')[0];
+                const senderName = this.contactMappings.get(senderPhone) || senderPhone;
+                messageText = `👤 ${senderName}:\n${text}`;
             }
-
-            // Handle different message types - FIXED: Check all media types properly
-            let messageHandled = false;
-
-            if (whatsappMsg.message?.imageMessage) {
-                await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
-                messageHandled = true;
-            } 
             
-            if (whatsappMsg.message?.videoMessage) {
-                await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId);
-                messageHandled = true;
-            } 
+            const messageId = await this.sendSimpleMessage(topicId, messageText, sender);
             
-            if (whatsappMsg.message?.audioMessage) {
-                await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId);
-                messageHandled = true;
-            } 
-            
-            if (whatsappMsg.message?.documentMessage) {
-                await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId);
-                messageHandled = true;
-            } 
-            
-            if (whatsappMsg.message?.stickerMessage) {
-                await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId);
-                messageHandled = true;
-            } 
-            
-            if (whatsappMsg.message?.locationMessage) { 
-                await this.handleWhatsAppLocation(whatsappMsg, topicId);
-                messageHandled = true;
-            } 
-            
-            if (whatsappMsg.message?.contactMessage) { 
-                await this.handleWhatsAppContact(whatsappMsg, topicId);
-                messageHandled = true;
+            // Store status message ID for reply handling
+            if (sender === 'status@broadcast') {
+                this.statusMessageIds.set(messageId, whatsappMsg.key);
             }
-
-            // Handle text messages (including captions and standalone text)
-            if (text && text.trim()) {
-                const messageId = await this.sendSimpleMessage(topicId, text, sender, participant);
-                
-                // Store status message ID for reply handling
-                if (sender === 'status@broadcast' && messageId) {
-                    this.statusMessageIds.set(messageId, whatsappMsg.key);
-                }
-                messageHandled = true;
-            }
-
-            if (!messageHandled) {
-                logger.debug('⚠️ Message type not handled:', Object.keys(whatsappMsg.message || {}));
-            }
-
-        } catch (error) {
-            logger.error('❌ Failed to sync WhatsApp message to Telegram:', error);
         }
     }
 
@@ -197,9 +382,11 @@ class TelegramBridge {
         let userPhone = participant.split('@')[0];
         
         try {
-            // Try to get pushname from message
+            // Try to get pushname from message or contacts
             if (whatsappMsg.pushName) {
                 userName = whatsappMsg.pushName;
+            } else if (this.contactMappings.has(userPhone)) {
+                userName = this.contactMappings.get(userPhone);
             }
         } catch (error) {
             logger.debug('Could not fetch contact info:', error);
@@ -249,15 +436,17 @@ class TelegramBridge {
                 }
                 iconColor = 0x6FB9F0; // Blue
             } else {
-                // For individual chats - use name OR number, not both
-                const participant = whatsappMsg.key.participant || chatJid;
-                const userInfo = this.userMappings.get(participant);
-                const phone = participant.split('@')[0];
+                // For individual chats - use contact name if available
+                const phone = chatJid.split('@')[0];
+                const contactName = this.contactMappings.get(phone);
                 
-                if (userInfo && userInfo.name) {
-                    topicName = userInfo.name;
+                if (contactName) {
+                    topicName = contactName;
                 } else {
-                    topicName = phone;
+                    // Try to get name from user mappings
+                    const participant = whatsappMsg.key.participant || chatJid;
+                    const userInfo = this.userMappings.get(participant);
+                    topicName = userInfo?.name || phone;
                 }
             }
 
@@ -299,11 +488,11 @@ class TelegramBridge {
                     welcomeText = `🏷️ **Group Chat**\n\n💬 Messages from this group will appear here`;
                 }
             } else {
-                const userInfo = this.userMappings.get(jid);
                 const phone = jid.split('@')[0];
+                const contactName = this.contactMappings.get(phone);
                 
                 welcomeText = `👤 **Contact Information**\n\n` +
-                             `📝 **Name:** ${userInfo?.name || 'Not available'}\n` +
+                             `📝 **Name:** ${contactName || 'Not in contacts'}\n` +
                              `📱 **Phone:** +${phone}\n` +
                              `🆔 **WhatsApp ID:** \`${jid}\`\n` +
                              `📅 **First Contact:** ${new Date().toLocaleDateString()}\n\n` +
@@ -363,22 +552,32 @@ class TelegramBridge {
         }, 30000);
 
         try {
-            const userInfo = this.userMappings.get(callerId);
-            const callerName = userInfo?.name || `+${callerId.split('@')[0]}`;
+            const phone = callerId.split('@')[0];
+            const callerName = this.contactMappings.get(phone) || `+${phone}`;
             
             // Get or create call topic
             const topicId = await this.getOrCreateTopic('call@broadcast', {
                 key: { remoteJid: 'call@broadcast', participant: callerId }
             });
 
-            // Simple call message format
-            const callMessage = `📞 ${callerName} 📱 ${new Date().toLocaleTimeString()}\n\nYou received a call`;
+            if (!topicId) {
+                logger.error('❌ Could not create call topic');
+                return;
+            }
+
+            // Enhanced call message format
+            const callMessage = `📞 **Incoming Call**\n\n` +
+                               `👤 **From:** ${callerName}\n` +
+                               `📱 **Number:** +${phone}\n` +
+                               `⏰ **Time:** ${new Date().toLocaleString()}\n` +
+                               `📋 **Status:** ${callEvent.status || 'Incoming'}`;
 
             await this.telegramBot.sendMessage(config.get('telegram.chatId'), callMessage, {
-                message_thread_id: topicId
+                message_thread_id: topicId,
+                parse_mode: 'Markdown'
             });
 
-            logger.debug(`📞 Sent call notification from ${callerName}`);
+            logger.info(`📞 Sent call notification from ${callerName}`);
         } catch (error) {
             logger.error('❌ Error handling call notification:', error);
         }
@@ -442,20 +641,24 @@ class TelegramBridge {
 
             logger.info(`💾 Saved ${mediaType} to: ${filePath} (${buffer.length} bytes)`);
 
+            // Add sender info for group messages
+            const sender = whatsappMsg.key.remoteJid;
+            const participant = whatsappMsg.key.participant || sender;
+            
+            if (sender.endsWith('@g.us') && participant !== sender) {
+                const senderPhone = participant.split('@')[0];
+                const senderName = this.contactMappings.get(senderPhone) || senderPhone;
+                caption = `👤 ${senderName}:\n${caption}`;
+            }
+
             // Send to Telegram based on media type
             const chatId = config.get('telegram.chatId');
-            
-            // Add sender info to caption
-            const participant = whatsappMsg.key.participant || whatsappMsg.key.remoteJid;
-            const userInfo = this.userMappings.get(participant);
-            const senderName = userInfo?.name || `+${participant.split('@')[0]}`;
-            const fullCaption = caption ? `${senderName}: ${caption}` : `📎 ${senderName} sent a ${mediaType}`;
             
             switch (mediaType) {
                 case 'image':
                     await this.telegramBot.sendPhoto(chatId, filePath, {
                         message_thread_id: topicId,
-                        caption: fullCaption
+                        caption: caption
                     });
                     break;
                     
@@ -464,12 +667,12 @@ class TelegramBridge {
                     if (mediaMessage.gifPlayback) {
                         await this.telegramBot.sendAnimation(chatId, filePath, {
                             message_thread_id: topicId,
-                            caption: fullCaption
+                            caption: caption
                         });
                     } else {
                         await this.telegramBot.sendVideo(chatId, filePath, {
                             message_thread_id: topicId,
-                            caption: fullCaption
+                            caption: caption
                         });
                     }
                     break;
@@ -478,12 +681,12 @@ class TelegramBridge {
                     if (mediaMessage.ptt) {
                         await this.telegramBot.sendVoice(chatId, filePath, {
                             message_thread_id: topicId,
-                            caption: fullCaption
+                            caption: caption
                         });
                     } else {
                         await this.telegramBot.sendAudio(chatId, filePath, {
                             message_thread_id: topicId,
-                            caption: fullCaption,
+                            caption: caption,
                             title: mediaMessage.title || 'Audio'
                         });
                     }
@@ -492,17 +695,13 @@ class TelegramBridge {
                 case 'document':
                     await this.telegramBot.sendDocument(chatId, filePath, {
                         message_thread_id: topicId,
-                        caption: fullCaption
+                        caption: caption
                     });
                     break;
                     
                 case 'sticker':
                     try {
                         await this.telegramBot.sendSticker(chatId, filePath, {
-                            message_thread_id: topicId
-                        });
-                        // Send sender info as separate message for stickers
-                        await this.telegramBot.sendMessage(chatId, `🎭 ${senderName} sent a sticker`, {
                             message_thread_id: topicId
                         });
                     } catch (stickerError) {
@@ -512,7 +711,7 @@ class TelegramBridge {
                         
                         await this.telegramBot.sendPhoto(chatId, pngPath, {
                             message_thread_id: topicId,
-                            caption: fullCaption || 'Sticker'
+                            caption: caption || 'Sticker'
                         });
                         await fs.unlink(pngPath).catch(() => {});
                     }
@@ -532,9 +731,17 @@ class TelegramBridge {
     async handleWhatsAppLocation(whatsappMsg, topicId) {
         try {
             const locationMessage = whatsappMsg.message.locationMessage;
-            const participant = whatsappMsg.key.participant || whatsappMsg.key.remoteJid;
-            const userInfo = this.userMappings.get(participant);
-            const senderName = userInfo?.name || `+${participant.split('@')[0]}`;
+            
+            // Add sender info for group messages
+            const sender = whatsappMsg.key.remoteJid;
+            const participant = whatsappMsg.key.participant || sender;
+            let caption = '';
+            
+            if (sender.endsWith('@g.us') && participant !== sender) {
+                const senderPhone = participant.split('@')[0];
+                const senderName = this.contactMappings.get(senderPhone) || senderPhone;
+                caption = `👤 ${senderName} shared location`;
+            }
             
             await this.telegramBot.sendLocation(config.get('telegram.chatId'), 
                 locationMessage.degreesLatitude, 
@@ -542,11 +749,11 @@ class TelegramBridge {
                     message_thread_id: topicId
                 });
                 
-            // Send sender info
-            await this.telegramBot.sendMessage(config.get('telegram.chatId'), 
-                `📍 ${senderName} shared their location`, {
+            if (caption) {
+                await this.telegramBot.sendMessage(config.get('telegram.chatId'), caption, {
                     message_thread_id: topicId
                 });
+            }
         } catch (error) {
             logger.error('❌ Failed to handle WhatsApp location message:', error);
         }
@@ -557,13 +764,21 @@ class TelegramBridge {
             const contactMessage = whatsappMsg.message.contactMessage;
             const vcard = contactMessage.vcard;
             const displayName = contactMessage.displayName || 'Unknown Contact';
-            const participant = whatsappMsg.key.participant || whatsappMsg.key.remoteJid;
-            const userInfo = this.userMappings.get(participant);
-            const senderName = userInfo?.name || `+${participant.split('@')[0]}`;
+
+            // Add sender info for group messages
+            const sender = whatsappMsg.key.remoteJid;
+            const participant = whatsappMsg.key.participant || sender;
+            let caption = `📇 Contact: ${displayName}`;
+            
+            if (sender.endsWith('@g.us') && participant !== sender) {
+                const senderPhone = participant.split('@')[0];
+                const senderName = this.contactMappings.get(senderPhone) || senderPhone;
+                caption = `👤 ${senderName} shared contact: ${displayName}`;
+            }
 
             await this.telegramBot.sendDocument(config.get('telegram.chatId'), Buffer.from(vcard), {
                 message_thread_id: topicId,
-                caption: `📇 ${senderName} shared contact: ${displayName}`,
+                caption: caption,
                 filename: `${displayName}.vcf`
             });
         } catch (error) {
@@ -571,7 +786,7 @@ class TelegramBridge {
         }
     }
 
-    // Add this new function to detect when user is typing
+    // Send presence when user is typing/active in Telegram
     setupTypingDetection() {
         if (!this.telegramBot) return;
         
@@ -643,6 +858,8 @@ class TelegramBridge {
                 await this.handleTelegramMedia(msg, 'photo');
             } else if (msg.video) {
                 await this.handleTelegramMedia(msg, 'video');
+            } else if (msg.animation) {
+                await this.handleTelegramMedia(msg, 'animation');
             } else if (msg.video_note) {
                 await this.handleTelegramMedia(msg, 'video_note');
             } else if (msg.voice) {
@@ -740,6 +957,10 @@ class TelegramBridge {
                     fileId = msg.video.file_id;
                     fileName = `video_${Date.now()}.mp4`;
                     break;
+                case 'animation':
+                    fileId = msg.animation.file_id;
+                    fileName = `animation_${Date.now()}.mp4`;
+                    break;
                 case 'video_note':
                     fileId = msg.video_note.file_id;
                     fileName = `video_note_${Date.now()}.mp4`;
@@ -792,23 +1013,19 @@ class TelegramBridge {
                     break;
                     
                 case 'video':
-                    // Check if it's actually a GIF animation
-                    const isGif = msg.video.mime_type === 'video/mp4' && 
-                                  (msg.video.file_name?.toLowerCase().includes('gif') || 
-                                   msg.animation); // Check if it's an animation
-                    
                     messageOptions = {
                         video: fs.readFileSync(filePath),
                         caption: caption,
-                        gifPlayback: isGif, // This tells WhatsApp it's a GIF
                         viewOnce: hasMediaSpoiler
                     };
                     break;
 
-                case 'video_note':
+                case 'animation':
+                    // Handle GIFs properly
                     messageOptions = {
                         video: fs.readFileSync(filePath),
                         caption: caption,
+                        gifPlayback: true, // This tells WhatsApp it's a GIF
                         viewOnce: hasMediaSpoiler
                     };
                     break;
@@ -840,9 +1057,32 @@ class TelegramBridge {
                     break;
                     
                 case 'sticker':
-                    messageOptions = {
-                        sticker: fs.readFileSync(filePath)
-                    };
+                    // Convert Telegram sticker to WhatsApp compatible format
+                    try {
+                        // First try to convert to PNG for better compatibility
+                        const pngPath = filePath.replace('.webp', '.png');
+                        await sharp(filePath)
+                            .resize(512, 512, { 
+                                fit: 'contain',
+                                background: { r: 0, g: 0, b: 0, alpha: 0 }
+                            })
+                            .png()
+                            .toFile(pngPath);
+                        
+                        messageOptions = {
+                            sticker: fs.readFileSync(pngPath)
+                        };
+                        
+                        // Clean up PNG file after sending
+                        setTimeout(() => fs.unlink(pngPath).catch(() => {}), 5000);
+                        
+                    } catch (conversionError) {
+                        logger.debug('Failed to convert sticker, sending as image:', conversionError);
+                        messageOptions = {
+                            image: fs.readFileSync(filePath),
+                            caption: 'Sticker'
+                        };
+                    }
                     break;
             }
 
@@ -940,26 +1180,19 @@ class TelegramBridge {
         }
     }
 
-    async sendSimpleMessage(topicId, text, sender, participant) {
+    async sendSimpleMessage(topicId, text, sender) {
         if (!topicId) return null;
 
         const chatId = config.get('telegram.chatId');
         
         try {
+            // Add sender info for status messages
             let messageText = text;
-            
-            // Add sender info for better context
-            if (sender !== 'status@broadcast') {
-                const userInfo = this.userMappings.get(participant);
-                const senderName = userInfo?.name || `+${participant.split('@')[0]}`;
-                
-                // Only add sender name if it's not already in the message
-                if (!text.startsWith(senderName)) {
-                    messageText = `${senderName}: ${text}`;
-                }
-            } else {
-                // For status messages, add special formatting
-                messageText = `📱 Status: ${text}`;
+            if (sender === 'status@broadcast') {
+                const participant = text.split('\n')[0]; // Extract participant from message
+                const phone = participant.split('@')[0];
+                const contactName = this.contactMappings.get(phone) || phone;
+                messageText = `📱 Status from ${contactName}\n\n${text}`;
             }
 
             const sentMessage = await this.telegramBot.sendMessage(chatId, messageText, {
@@ -1007,7 +1240,13 @@ class TelegramBridge {
             `✅ Bot: ${config.get('bot.name')} v${config.get('bot.version')}\n` +
             `📱 WhatsApp: Connected\n` +
             `🔗 Telegram Bridge: Active\n` +
+            `📞 Contacts: ${this.contactMappings.size} synced\n` +
             `🚀 Ready to bridge messages!`);
+
+        // Send welcome message to bot chat if available
+        if (this.botChatId) {
+            await this.sendBotWelcome(this.botChatId);
+        }
     }
 
     // Setup WhatsApp event handlers
@@ -1018,6 +1257,35 @@ class TelegramBridge {
         this.whatsappBot.sock.ev.on('call', async (calls) => {
             for (const call of calls) {
                 await this.handleCallNotification(call);
+            }
+        });
+
+        // Handle contact updates
+        this.whatsappBot.sock.ev.on('contacts.update', async (contacts) => {
+            for (const contact of contacts) {
+                if (contact.id && contact.name) {
+                    const phone = contact.id.split('@')[0];
+                    const oldName = this.contactMappings.get(phone);
+                    
+                    if (oldName !== contact.name) {
+                        this.contactMappings.set(phone, contact.name);
+                        logger.info(`📞 Updated contact: ${phone} -> ${contact.name}`);
+                        
+                        // Update topic name if exists
+                        const jid = contact.id;
+                        if (this.chatMappings.has(jid)) {
+                            const topicId = this.chatMappings.get(jid);
+                            try {
+                                await this.telegramBot.editForumTopic(config.get('telegram.chatId'), topicId, {
+                                    name: contact.name
+                                });
+                                logger.info(`📝 Updated topic name for ${phone} to ${contact.name}`);
+                            } catch (error) {
+                                logger.debug(`Could not update topic name for ${phone}:`, error);
+                            }
+                        }
+                    }
+                }
             }
         });
 
