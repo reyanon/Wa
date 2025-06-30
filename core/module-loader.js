@@ -1,6 +1,6 @@
 const path = require('path');
 const fs = require('fs-extra');
-const logger = require('../core/logger'); // Adjusted path based on typical project structure
+const logger = require('./logger'); // Adjusted path based on typical project structure
 
 class ModuleLoader {
     constructor(bot) {
