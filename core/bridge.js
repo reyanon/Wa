@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const TelegramCommands = require('./commands'); // Ensure this path is correct
+const TelegramCommands = require('./comands'); // Ensure this path is correct
 const config = require('../config');
 const logger = require('./logger');
 const { connectDb, closeDb } = require('./db'); // Import connectDb and closeDb
@@ -63,8 +63,8 @@ class TelegramBridge {
             this.telegramBot = new TelegramBot(token, { polling: true });
             logger.info('✅ Telegram bot initialized.');
 
-            // Initialize commands
-            this.commands = new TelegramCommands(this); // Pass the bridge instance to commands
+            // Initialize commands, passing the already connected DB instance
+            this.commands = new TelegramCommands(this, this.db); // MODIFIED THIS LINE
             logger.info('✅ Telegram commands initialized.');
 
             this.setupTelegramHandlers();
@@ -86,7 +86,7 @@ class TelegramBridge {
             logger.info('🚀 Telegram bridge initialized and ready.');
 
         } catch (error) {
-            logger.error('❌ Failed to initialize Telegram bridge:', error.message || error); // MODIFIED THIS LINE
+            logger.error('❌ Failed to initialize Telegram bridge:', error.message || error);
             // Propagate error if critical, or handle gracefully
         }
     }
@@ -682,7 +682,7 @@ class TelegramBridge {
         // Message Listener (for new messages)
         sock.ev.on('messages.upsert', async (m) => {
             // Process messages not sent by 'fromMe'
-            // If m.key.fromMe is true, it's a message sent by the bot's own WhatsApp number.
+            // If m.messages[0].key.fromMe is true, it's a message sent by the bot's own WhatsApp number.
             // We should process it if it's a group message where the bot is a participant
             // or if it's a message from the bot's own number to a new contact (initial message)
             // that needs a topic created.
