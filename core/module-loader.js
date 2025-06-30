@@ -1,205 +1,103 @@
-const fs = require('fs-extra');
+
 const path = require('path');
+const fs = require('fs-extra');
 const logger = require('./logger');
 
-/**
- * Module Manager for NexusWA
- * Loads and validates modules from modules/ and modules/custom/
- */
-class ModuleManager {
+class ModuleLoader {
     constructor(bot) {
         this.bot = bot;
         this.modules = new Map();
-        this.commands = new Map();
-        this.systemModulesPath = path.join(__dirname, '../modules');
-        this.customModulesPath = path.join(__dirname, '../modules/custom');
-        this.systemCount = 0;
-        this.customCount = 0;
     }
 
-    /**
-     * Initialize and load all modules
-     */
-    async initialize() {
-        logger.info('📦 Loading modules...');
-        
-        try {
-            // Ensure directories exist
-            await fs.ensureDir(this.systemModulesPath);
-            await fs.ensureDir(this.customModulesPath);
-            
-            // Load system modules
-            this.systemCount = await this.loadModulesFromPath(this.systemModulesPath, 'system');
-            
-            // Load custom modules
-            this.customCount = await this.loadModulesFromPath(this.customModulesPath, 'custom');
-            
-            logger.info(`✅ Module loading complete:`);
-            logger.info(`   • System modules: ${this.systemCount}`);
-            logger.info(`   • Custom modules: ${this.customCount}`);
-            logger.info(`   • Total modules: ${this.systemCount + this.customCount}`);
-            
-        } catch (error) {
-            logger.error('❌ Failed to load modules:', error);
+    async loadModules() {
+        const systemPath = path.join(__dirname, '../modules');
+        const customPath = path.join(__dirname, '../custom_modules');
+
+        await fs.ensureDir(systemPath);
+        await fs.ensureDir(customPath);
+
+        const [systemFiles, customFiles] = await Promise.all([
+            fs.readdir(systemPath),
+            fs.readdir(customPath)
+        ]);
+
+        for (const file of systemFiles) {
+            if (file.endsWith('.js')) {
+                await this.loadModule(path.join(systemPath, file), true);
+            }
         }
+
+        for (const file of customFiles) {
+            if (file.endsWith('.js')) {
+                await this.loadModule(path.join(customPath, file), false);
+            }
+        }
+
+        const validCount = [...this.modules.values()].filter(m => m.status === 'valid').length;
+        const partialCount = [...this.modules.values()].filter(m => m.status === 'partial').length;
+
+        logger.info(`✅ Loaded ${validCount} valid modules, ${partialCount} partially valid.`);
     }
 
-    /**
-     * Load modules from a specific path
-     */
-    async loadModulesFromPath(modulePath, type) {
-        let loadedCount = 0;
-        
+    async loadModule(filePath, isSystem) {
+        const moduleId = path.basename(filePath, '.js');
+
         try {
-            const files = await fs.readdir(modulePath);
-            
-            for (const file of files) {
-                if (file.endsWith('.js')) {
-                    const fullPath = path.join(modulePath, file);
-                    const success = await this.loadModule(fullPath, type);
-                    if (success) loadedCount++;
+            delete require.cache[require.resolve(filePath)];
+            const mod = require(filePath);
+
+            if (!mod || typeof mod !== 'object') {
+                logger.warn(`❌ ${isSystem ? 'System' : 'Custom'} module '${moduleId}' does not export a valid object.`);
+                return;
+            }
+
+            const status = this.checkModuleStructure(mod, moduleId, isSystem);
+
+            if (mod.init) await mod.init();
+            if (mod.commands) {
+                for (const cmd of mod.commands) {
+                    this.bot.messageHandler.registerCommandHandler(cmd.name, cmd);
                 }
             }
-        } catch (error) {
-            logger.debug(`Could not read directory ${modulePath}:`, error.message);
-        }
-        
-        return loadedCount;
-    }
-
-    /**
-     * Load and validate a single module
-     */
-    async loadModule(modulePath, type) {
-        try {
-            const moduleId = path.basename(modulePath, '.js');
-            
-            // Skip if already loaded
-            if (this.modules.has(moduleId)) {
-                return false;
-            }
-            
-            // Clear require cache for hot reloading
-            delete require.cache[require.resolve(modulePath)];
-            
-            const moduleData = require(modulePath);
-            
-            // Validate module structure
-            const validation = this.validateModuleStructure(moduleData, moduleId);
-            if (!validation.valid) {
-                logger.warn(`⚠️ Invalid module structure: ${moduleId}`);
-                logger.warn(`   Missing: ${validation.missing.join(', ')}`);
-                this.showRequiredStructure();
-                return false;
-            }
-            
-            // Register commands
-            if (moduleData.commands) {
-                for (const command of moduleData.commands) {
-                    if (command.name) {
-                        this.commands.set(command.name, {
-                            ...command,
-                            module: moduleData.name
-                        });
-                    }
+            if (mod.messageHooks) {
+                for (const [hook, fn] of Object.entries(mod.messageHooks)) {
+                    this.bot.messageHandler.registerMessageHook(hook, fn.bind(mod));
                 }
             }
-            
+
             this.modules.set(moduleId, {
-                ...moduleData,
-                type,
-                loaded: new Date()
+                instance: mod,
+                path: filePath,
+                isSystem,
+                status
             });
-            
-            logger.info(`✅ Loaded ${type} module: ${moduleData.name} v${moduleData.version}`);
-            return true;
-            
-        } catch (error) {
-            logger.error(`❌ Failed to load module ${modulePath}:`, error.message);
-            return false;
+
+            logger.info(`✅ Loaded ${isSystem ? 'System' : 'Custom'} module: ${moduleId} (${status})`);
+        } catch (err) {
+            logger.error(`❌ Failed to load module '${moduleId}':`, err);
         }
     }
 
-    /**
-     * Validate module structure
-     */
-    validateModuleStructure(moduleData, moduleId) {
-        const required = ['name', 'version', 'description', 'commands'];
+    checkModuleStructure(mod, moduleId, isSystem) {
         const missing = [];
-        
-        for (const field of required) {
-            if (!moduleData[field]) {
-                missing.push(field);
-            }
+        if (!mod.name) missing.push('name');
+        if (!mod.version) missing.push('version');
+        if (!mod.commands && !mod.messageHooks) missing.push('commands/messageHooks');
+
+        if (missing.length > 0) {
+            logger.warn(`⚠️ ${isSystem ? 'System' : 'Custom'} module '${moduleId}' missing: ${missing.join(', ')}`);
         }
-        
-        // Check commands structure
-        if (moduleData.commands && Array.isArray(moduleData.commands)) {
-            for (const command of moduleData.commands) {
-                if (!command.name || !command.description || !command.usage || !command.execute) {
-                    missing.push('commands[].{name|description|usage|execute}');
-                    break;
-                }
-            }
-        }
-        
-        return {
-            valid: missing.length === 0,
-            missing
-        };
+
+        return missing.length === 0 ? 'valid' : 'partial';
     }
 
-    /**
-     * Show required module structure
-     */
-    showRequiredStructure() {
-        logger.info(`📋 Required module structure:`);
-        logger.info(`   {`);
-        logger.info(`     name: 'Module Name',`);
-        logger.info(`     version: '1.0.0',`);
-        logger.info(`     description: 'Module description',`);
-        logger.info(`     commands: [`);
-        logger.info(`       {`);
-        logger.info(`         name: 'command',`);
-        logger.info(`         description: 'Command description',`);
-        logger.info(`         usage: 'prefix + command [args]',`);
-        logger.info(`         execute: async (message, args, context) => {}`);
-        logger.info(`       }`);
-        logger.info(`     ]`);
-        logger.info(`   }`);
+    getModule(name) {
+        return this.modules.get(name)?.instance || null;
     }
 
-    /**
-     * Get command handler
-     */
-    getCommand(commandName) {
-        return this.commands.get(commandName);
-    }
-
-    /**
-     * Get module statistics
-     */
-    getModuleStats() {
-        return {
-            system: this.systemCount,
-            custom: this.customCount,
-            total: this.systemCount + this.customCount
-        };
-    }
-
-    /**
-     * Get all loaded modules
-     */
-    getModules() {
-        return Array.from(this.modules.values());
-    }
-
-    /**
-     * Get all commands
-     */
-    getCommands() {
-        return Array.from(this.commands.values());
+    listModules() {
+        return [...this.modules.keys()];
     }
 }
 
-module.exports = ModuleManager;
+module.exports = ModuleLoader;
