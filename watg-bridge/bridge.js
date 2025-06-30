@@ -1,7 +1,8 @@
 const TelegramBot = require('node-telegram-bot-api');
+const TelegramCommands = require('./commands');
 const config = require('../config');
-const logger = require('..core//logger');
-const { connectDb } = require('../utils/db');
+const logger = require('../core/logger');
+const { connectDb } = require('..utils/db');
 const fs = require('fs-extra');
 const path = require('path');
 const axios = require('axios');
@@ -28,112 +29,183 @@ class TelegramBridge {
         this.collections = {};
     }
 
-async initialize() {
-    const token = config.get('telegram.botToken');
-    const chatId = config.get('telegram.chatId');
-    
-    if (!token || token.includes('YOUR_BOT_TOKEN') || !chatId || chatId.includes('YOUR_CHAT_ID')) {
-        logger.warn('⚠️ Telegram bot token or chat ID not configured properly');
-        return;
-    }
-
-    try {
-        await this.initializeDatabase();
-        await fs.ensureDir(this.tempDir);
-
-        this.telegramBot = new TelegramBot(token, {
-            polling: true,
-            onlyFirstMatch: true
-        });
-
-        this.commands = new TelegramCommands(this);
-
-        await this.setupTelegramHandlers();
-        await this.loadMappingsFromDb();
-        await this.syncContacts();
-
-        await this.telegramBot.sendMessage(this.botChatId || chatId, '✅ Telegram bridge initialized and ready.');
-        logger.info('✅ Telegram bridge initialized');
-    } catch (error) {
-        logger.error('❌ Failed to initialize Telegram bridge:', error);
-    }
-}
-
-async initializeDatabase() {
-    try {
-        this.db = await connectDb();
-        this.collections = {
-            bridge: this.db.collection('bridge')
-        };
-        logger.info('📊 Database initialized for Telegram bridge');
-    } catch (error) {
-        logger.error('❌ Failed to initialize database:', error);
-    }
-}
-
-async loadMappingsFromDb() {
-    try {
-        const doc = await this.collections.bridge.findOne({ _id: 'main' });
-        if (!doc) {
-            logger.warn('⚠️ No existing mappings found in bridge collection.');
+    async initialize() {
+        const token = config.get('telegram.botToken');
+        const chatId = config.get('telegram.chatId');
+        
+        if (!token || token.includes('YOUR_BOT_TOKEN') || !chatId || chatId.includes('YOUR_CHAT_ID')) {
+            logger.warn('⚠️ Telegram bot token or chat ID not configured properly');
             return;
         }
 
-        this.chatMappings = new Map(Object.entries(doc.chatMappings || {}));
-        this.userMappings = new Map(Object.entries(doc.userMappings || {}));
-        this.contactMappings = new Map(Object.entries(doc.contactMappings || {}));
-        logger.info(`✅ Loaded mappings from bridge DB document.`);
-    } catch (error) {
-        logger.error('❌ Error loading bridge mappings:', error);
-    }
-}
-
-async saveMappingsToDb() {
-    try {
-        await this.collections.bridge.updateOne(
-            { _id: 'main' },
-            {
-                $set: {
-                    chatMappings: Object.fromEntries(this.chatMappings),
-                    userMappings: Object.fromEntries(this.userMappings),
-                    contactMappings: Object.fromEntries(this.contactMappings),
-                    updatedAt: new Date()
-                }
-            },
-            { upsert: true }
-        );
-        logger.debug('💾 Saved all mappings to bridge document.');
-    } catch (error) {
-        logger.error('❌ Failed to save bridge mappings:', error);
-    }
-}
-
-
-async syncContacts() {
-    logger.info('🔄 Syncing WhatsApp contacts...');
-    const sock = this.whatsappBot.sock;
-    if (!sock?.contacts) {
-        logger.warn('⚠️ WhatsApp not connected or contacts unavailable.');
-        return;
-    }
-
-    try {
-        const contacts = sock.contacts;
-        let count = 0;
-        for (const [jid, contact] of Object.entries(contacts)) {
-            if (!jid.endsWith('@s.whatsapp.net')) continue;
-            const displayName = contact.name || contact.notify || jid.split('@')[0];
-            const number = jid.split('@')[0];
-            this.contactMappings.set(jid, { name: displayName, number });
-            count++;
+        try {
+            // Initialize database
+            await this.initializeDatabase();
+            
+            // Ensure temp directory exists
+            await fs.ensureDir(this.tempDir);
+            
+            this.telegramBot = new TelegramBot(token, { 
+                polling: true,
+                onlyFirstMatch: true
+            });
+            
+            // Initialize commands handler
+            this.commands = new TelegramCommands(this);
+            
+            await this.setupTelegramHandlers();
+            await this.loadMappingsFromDb();
+            await this.syncContacts();
+            
+            logger.info('✅ Telegram bridge initialized');
+        } catch (error) {
+            logger.error('❌ Failed to initialize Telegram bridge:', error);
         }
-        await this.saveMappingsToDb();
-        logger.info(`✅ Synced ${count} contacts from WhatsApp.`);
-    } catch (error) {
-        logger.error('❌ Failed to sync contacts:', error);
     }
-}
 
+    async initializeDatabase() {
+        try {
+            this.db = await connectDb();
+            
+            // Initialize collections
+            this.collections = {
+                chatMappings: this.db.collection('telegram_chat_mappings'),
+                userMappings: this.db.collection('telegram_user_mappings'),
+                contactMappings: this.db.collection('telegram_contact_mappings'),
+                bridgeSettings: this.db.collection('telegram_bridge_settings')
+            };
+
+            // Create indexes for better performance
+            await this.collections.chatMappings.createIndex({ whatsappJid: 1 }, { unique: true });
+            await this.collections.userMappings.createIndex({ whatsappId: 1 }, { unique: true });
+            await this.collections.contactMappings.createIndex({ phone: 1 }, { unique: true });
+
+            logger.info('📊 Database initialized for Telegram bridge');
+        } catch (error) {
+            logger.error('❌ Failed to initialize database:', error);
+        }
+    }
+
+    async loadMappingsFromDb() {
+        try {
+            // Load chat mappings
+            const chatMappings = await this.collections.chatMappings.find({}).toArray();
+            for (const mapping of chatMappings) {
+                this.chatMappings.set(mapping.whatsappJid, mapping.telegramTopicId);
+            }
+
+            // Load user mappings
+            const userMappings = await this.collections.userMappings.find({}).toArray();
+            for (const mapping of userMappings) {
+                this.userMappings.set(mapping.whatsappId, {
+                    name: mapping.name,
+                    phone: mapping.phone,
+                    firstSeen: mapping.firstSeen,
+                    messageCount: mapping.messageCount || 0
+                });
+            }
+
+            // Load contact mappings
+            const contactMappings = await this.collections.contactMappings.find({}).toArray();
+            for (const mapping of contactMappings) {
+                this.contactMappings.set(mapping.phone, mapping.name);
+            }
+
+            logger.info(`📊 Loaded mappings from DB: ${this.chatMappings.size} chats, ${this.userMappings.size} users, ${this.contactMappings.size} contacts`);
+        } catch (error) {
+            logger.error('❌ Failed to load mappings from database:', error);
+        }
+    }
+
+    async saveChatMapping(whatsappJid, telegramTopicId) {
+        try {
+            await this.collections.chatMappings.updateOne(
+                { whatsappJid },
+                { 
+                    $set: { 
+                        whatsappJid, 
+                        telegramTopicId, 
+                        createdAt: new Date(),
+                        lastActivity: new Date()
+                    } 
+                },
+                { upsert: true }
+            );
+            this.chatMappings.set(whatsappJid, telegramTopicId);
+        } catch (error) {
+            logger.error('❌ Failed to save chat mapping:', error);
+        }
+    }
+
+    async saveUserMapping(whatsappId, userData) {
+        try {
+            await this.collections.userMappings.updateOne(
+                { whatsappId },
+                { 
+                    $set: { 
+                        whatsappId,
+                        name: userData.name,
+                        phone: userData.phone,
+                        firstSeen: userData.firstSeen,
+                        messageCount: userData.messageCount || 0,
+                        lastSeen: new Date()
+                    } 
+                },
+                { upsert: true }
+            );
+            this.userMappings.set(whatsappId, userData);
+        } catch (error) {
+            logger.error('❌ Failed to save user mapping:', error);
+        }
+    }
+
+    async saveContactMapping(phone, name) {
+        try {
+            await this.collections.contactMappings.updateOne(
+                { phone },
+                { 
+                    $set: { 
+                        phone, 
+                        name, 
+                        updatedAt: new Date() 
+                    } 
+                },
+                { upsert: true }
+            );
+            this.contactMappings.set(phone, name);
+        } catch (error) {
+            logger.error('❌ Failed to save contact mapping:', error);
+        }
+    }
+
+    async syncContacts() {
+        try {
+            if (!this.whatsappBot.sock) return;
+            
+            logger.info('📞 Syncing contacts...');
+            
+            const contacts = await this.whatsappBot.sock.getContacts();
+            let syncedCount = 0;
+            
+            for (const contact of contacts) {
+                if (contact.id && contact.name) {
+                    const phone = contact.id.split('@')[0];
+                    const existingName = this.contactMappings.get(phone);
+                    
+                    if (existingName !== contact.name) {
+                        await this.saveContactMapping(phone, contact.name);
+                        syncedCount++;
+                    }
+                }
+            }
+            
+            logger.info(`✅ Synced ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
+            await this.updateTopicNames();
+            
+        } catch (error) {
+            logger.error('❌ Failed to sync contacts:', error);
+        }
+    }
 
     async updateTopicNames() {
         try {
