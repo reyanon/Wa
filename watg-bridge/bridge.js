@@ -1339,7 +1339,7 @@ class TelegramBridge {
 
         logger.info('📱 WhatsApp event handlers set up for Telegram bridge');
     }
-}
+
 
     async shutdown() {
         logger.info('🛑 Shutting down Telegram bridge...');
