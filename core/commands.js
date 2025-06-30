@@ -1,4 +1,3 @@
-const TelegramBot = require('node-telegram-bot-api'); // This import is not strictly needed here anymore, but keeping it for context
 const config = require('../config');
 const logger = require('./logger');
 
@@ -6,8 +5,10 @@ class TelegramCommands {
     constructor(bridge) {
         this.bridge = bridge; // The TelegramBridge instance
         this.bot = bridge.telegramBot;
-        this.messageQueue = new Map(); // Stores messages for rate limiting
-        this.commandRateLimits = new Map(); // Stores rate limit info for commands
+        // The messageQueue and commandRateLimits are related to rate-limiting commands,
+        // so they belong here.
+        this.messageQueue = new Map(); 
+        this.commandRateLimits = new Map(); 
         this.rateLimitDuration = config.get('features.rateLimiting.duration') || 5000; // Default 5 seconds
         this.rateLimitMessageCount = config.get('features.rateLimiting.messageCount') || 3; // Default 3 messages
         
@@ -25,6 +26,15 @@ class TelegramCommands {
         this.bot.onText(/\/synccontacts/, this.wrapCommand(this.handleSyncContacts));
         this.bot.onText(/\/settargetchat (.+)/, this.wrapCommand(this.handleSetTargetChat)); 
         this.bot.onText(/\/send (.+) (.+)/, this.wrapCommand(this.handleSend)); // Matches /send <number> <message>
+
+        // Keep original commands from previous comands.js as requested
+        this.bot.onText(/\/contacts/, this.wrapCommand(this.handleContacts));
+        this.bot.onText(/\/sync/, this.wrapCommand(this.handleSync)); // Alias for /synccontacts
+        this.bot.onText(/\/bridge (.+)/, this.wrapCommand(this.handleBridgeControl)); 
+        this.bot.onText(/\/db (.+)/, this.wrapCommand(this.handleDbCommand)); // Retaining this as per original file
+        this.bot.onText(/\/clearauth/, this.wrapCommand(this.handleClearAuth)); // Retaining clearauth
+        this.bot.onText(/\/createtopic/, this.wrapCommand(this.handleCreateTopic)); // Retaining createtopic
+        this.bot.onText(/\/deletetopic/, this.wrapCommand(this.handleDeleteTopic)); // Retaining deletetopic
     }
 
     wrapCommand(handler) {
@@ -43,7 +53,6 @@ class TelegramCommands {
 
                 const commandData = this.commandRateLimits.get(userCommandKey);
 
-                // Clear old counts
                 if (now - commandData.firstTimestamp > this.rateLimitDuration) {
                     commandData.count = 0;
                     commandData.firstTimestamp = now;
@@ -63,7 +72,8 @@ class TelegramCommands {
             }
 
             try {
-                await handler.call(this, msg, match);
+                // Pass msg and match directly to handler
+                await handler.call(this, msg, match); 
             } catch (error) {
                 logger.error(`❌ Error handling command ${command} for user ${chatId}:`, error);
                 await this.bot.sendMessage(chatId, `❌ An error occurred while processing your command.`);
@@ -72,8 +82,10 @@ class TelegramCommands {
     }
 
     isOwner(chatId) {
-        const ownerId = config.get('bot.owner');
-        return ownerId && ownerId === chatId.toString();
+        const ownerId = config.get('bot.owner'); // This should be WA JID or Telegram ID
+        // For Telegram commands, we primarily check against Telegram adminIds
+        const telegramAdminIds = config.get('telegram.adminIds');
+        return telegramAdminIds.includes(chatId);
     }
 
     async handleStart(msg) {
@@ -106,7 +118,7 @@ class TelegramCommands {
                             `• WhatsApp Connection: ${waStatus}\n` +
                             `• Telegram Bot: ${tgStatus}\n` +
                             `• Telegram Bridge: ${bridgeStatus}\n` + 
-                            `• Owner ID: \`${ownerId}\`\n` +
+                            `• Owner ID (WA): \`${ownerId}\`\n` +
                             `• Target Telegram Chat ID: \`${targetChatId}\`\n` + 
                             `• Synced WhatsApp Contacts: ${this.bridge.contactMappings.size}\n` +
                             `• Active WhatsApp Topics: ${this.bridge.chatMappings.size}\n` +
@@ -125,16 +137,22 @@ class TelegramCommands {
             { cmd: '/ping', desc: 'Check bot responsiveness' },
             { cmd: '/status', desc: 'Show bot connection status and uptime' },
             { cmd: '/help', desc: 'Show this command menu' },
-            { cmd: '/send <number> <message>', desc: 'Send a message to a WhatsApp number' }
+            { cmd: '/send <number> <message>', desc: 'Send a message to a WhatsApp number' },
+            { cmd: '/contacts', desc: 'List synced WhatsApp contacts' },
+            { cmd: '/sync', desc: 'Manually sync WhatsApp contacts to the database' },
         ];
 
         if (this.isOwner(chatId)) {
             helpMessage += `\n👑 *Owner Commands:*\n`;
             commands.push(
                 { cmd: '/restart', desc: 'Restart the bot (owner only)' },
-                { cmd: '/setowner', desc: 'Set current user as owner (owner only)' },
-                { cmd: '/synccontacts', desc: 'Sync WhatsApp contacts (owner only)' },
-                { cmd: '/settargetchat <ID>', desc: 'Set the main Telegram chat ID for bridging (owner only)' } 
+                { cmd: '/setowner', desc: 'Set current user as owner (owner only)' }, // Now only sets Telegram owner ID
+                { cmd: '/settargetchat <ID>', desc: 'Set the main Telegram chat ID for bridging (owner only)' },
+                { cmd: '/bridge <start|stop|status>', desc: 'Control the bridge\'s operation (owner only)' },
+                { cmd: '/db <save|load|clear>', desc: 'Perform database operations on mappings (owner only)' },
+                { cmd: '/clearauth', desc: 'Clear WhatsApp authentication info (owner only)' },
+                { cmd: '/createtopic <WA_JID> <Name>', desc: 'Manually create a Telegram topic for a WhatsApp JID (owner only)' },
+                { cmd: '/deletetopic <WA_JID_or_TopicID>', desc: 'Delete a WhatsApp topic mapping (owner only)' }
             );
         }
 
@@ -158,14 +176,22 @@ class TelegramCommands {
 
     async handleSetOwner(msg) {
         const chatId = msg.chat.id;
-        if (config.get('bot.owner') && config.get('bot.owner') !== chatId.toString()) {
-            await this.bot.sendMessage(chatId, '🚫 Bot owner is already set and you are not the current owner.');
+        const newOwnerTelegramId = msg.from.id; // The user who sent the command
+
+        // Only allow setting if no owner is configured, or if the current user is an existing admin
+        const currentAdminIds = config.get('telegram.adminIds');
+        if (currentAdminIds && currentAdminIds.length > 0 && !currentAdminIds.includes(newOwnerTelegramId)) {
+            await this.bot.sendMessage(chatId, '🚫 Bot owner is already set and you are not an authorized admin.');
             return;
         }
-        config.set('bot.owner', chatId.toString());
+
+        // Set the new owner's Telegram ID
+        config.set('telegram.adminIds', [newOwnerTelegramId]); // Overwrite with new owner
+        config.set('bot.owner', this.bridge.whatsappBot.sock?.user?.id || 'not_set@s.whatsapp.net'); // Keep WhatsApp owner JID if available
+        
         await config.save(); 
-        await this.bot.sendMessage(chatId, `👑 You (${chatId}) have been set as the bot owner.`);
-        logger.info(`👑 Bot owner set to: ${chatId}`);
+        await this.bot.sendMessage(chatId, `👑 You (${newOwnerTelegramId}) have been set as the primary bot administrator.`);
+        logger.info(`👑 Bot administrator set to: ${newOwnerTelegramId}`);
     }
 
     async handleSetTargetChat(msg, match) {
@@ -238,6 +264,193 @@ class TelegramCommands {
         } catch (error) {
             logger.error(`❌ Failed to send message to ${number}:`, error);
             await this.bot.sendMessage(chatId, `❌ Failed to send message: ${error.message}`);
+        }
+    }
+
+    // --- Original Commands (Re-added as requested) ---
+
+    async handleContacts(msg) {
+        const chatId = msg.chat.id;
+        if (!this.isOwner(chatId)) { // Added owner check
+            await this.bot.sendMessage(chatId, '🚫 You are not authorized to use this command.');
+            return;
+        }
+
+        if (this.bridge.contactMappings.size === 0) {
+            await this.bot.sendMessage(chatId, 'No contacts synced yet. Use /sync to sync contacts.');
+            return;
+        }
+
+        let contactList = '📚 *Synced WhatsApp Contacts:*\n\n';
+        // Iterate through contactMappings (which are now `whatsappJid -> {name, number}` in bridge)
+        this.bridge.contactMappings.forEach((contactData, jid) => {
+            contactList += `• ${contactData.name || jid.split('@')[0]} (${contactData.number || jid.split('@')[0]})\n`;
+        });
+
+        await this.bot.sendMessage(chatId, contactList, { 
+            parse_mode: 'Markdown' 
+        });
+    }
+
+    async handleSync(msg) { // Alias for /synccontacts
+        await this.handleSyncContacts(msg);
+    }
+
+    async handleBridgeControl(msg, match) {
+        const chatId = msg.chat.id;
+        const action = match[1].split(' ')[0].toLowerCase();
+
+        if (!this.isOwner(chatId)) {
+            await this.bot.sendMessage(chatId, '🚫 You are not authorized to use this command.');
+            return;
+        }
+
+        switch (action) {
+            case 'start':
+                this.bridge.startBridge();
+                await this.bot.sendMessage(chatId, '✅ Telegram bridge activated.');
+                break;
+            case 'stop':
+                this.bridge.stopBridge();
+                await this.bot.sendMessage(chatId, '🚫 Telegram bridge deactivated.');
+                break;
+            case 'status':
+                await this.handleStatus(msg); // Reuse status handler
+                break;
+            default:
+                await this.bot.sendMessage(chatId, 'Usage: /bridge <start|stop|status>');
+        }
+    }
+
+    async handleDbCommand(msg, match) {
+        const chatId = msg.chat.id;
+        const action = match[1].split(' ')[0].toLowerCase();
+
+        if (!this.isOwner(chatId)) {
+            await this.bot.sendMessage(chatId, '🚫 You are not authorized to use this command.');
+            return;
+        }
+
+        try {
+            // DB operations are handled by the bridge
+            switch (action) {
+                case 'save':
+                    // Trigger saving of current in-memory mappings to DB
+                    // Note: Current save methods in bridge operate on single items.
+                    // For a full "save all," you'd need batch operations or iterate maps.
+                    // For simplicity, we'll just acknowledge the request. Real-time saving is handled by individual save calls.
+                    await this.bot.sendMessage(chatId, '✅ In-memory mappings are periodically saved. Manual "save all" is not implemented as a single batch operation here.');
+                    break;
+                case 'load':
+                    await this.bridge.loadMappingsFromDb();
+                    await this.bot.sendMessage(chatId, `✅ Mappings reloaded from database. Loaded ${this.bridge.chatMappings.size} chats, ${this.bridge.userMappings.size} users, ${this.bridge.contactMappings.size} contacts.`);
+                    break;
+                case 'clear':
+                    // Clear all mappings from DB and in-memory
+                    await this.bridge.collections.chatMappings.deleteMany({});
+                    await this.bridge.collections.userMappings.deleteMany({});
+                    await this.bridge.collections.contactMappings.deleteMany({});
+                    this.bridge.chatMappings.clear();
+                    this.bridge.userMappings.clear();
+                    this.bridge.contactMappings.clear();
+                    await this.bot.sendMessage(chatId, '⚠️ All mappings cleared from database and memory.');
+                    break;
+                default:
+                    await this.bot.sendMessage(chatId, `❌ Unknown database action: ${action}\nUse: save, load, or clear.`);
+            }
+        } catch (error) {
+            logger.error(`❌ Error handling database command ${action}:`, error);
+            await this.bot.sendMessage(chatId, `❌ Failed to execute database command: ${error.message}`);
+        }
+    }
+
+    async handleClearAuth(msg) {
+        const chatId = msg.chat.id;
+        if (!this.isOwner(chatId)) {
+            await this.bot.sendMessage(chatId, '🚫 You are not authorized to use this command.');
+            return;
+        }
+        const authPath = './auth_info'; // This path is relative to the bot's root, not bridge
+        try {
+            await fs.remove(authPath);
+            await this.bot.sendMessage(chatId, '🗑️ WhatsApp authentication info cleared. Please restart the bot and scan QR.');
+            logger.info('🗑️ WhatsApp authentication info cleared by owner.');
+            process.exit(0); 
+        } catch (error) {
+            logger.error('❌ Failed to clear auth info:', error);
+            await this.bot.sendMessage(chatId, `❌ Failed to clear auth info: ${error.message}`);
+        }
+    }
+
+    async handleCreateTopic(msg, match) {
+        const chatId = msg.chat.id;
+        if (!this.isOwner(chatId)) {
+            await this.bot.sendMessage(chatId, '🚫 You are not authorized to use this command.');
+            return;
+        }
+        const args = msg.text.split(' ').slice(1);
+        if (args.length < 2) {
+            await this.bot.sendMessage(chatId, '❓ Usage: /createtopic <WhatsAppJID> <TopicName>\nExample: /createtopic 1234567890@s.whatsapp.net MyFriend');
+            return;
+        }
+        const whatsappJid = args[0];
+        const topicName = args.slice(1).join(' '); 
+
+        try {
+            const topicId = await this.bridge.getOrCreateTopic(whatsappJid, { initialPushName: topicName }); // Use initialPushName
+            if (topicId) {
+                await this.bot.sendMessage(chatId, `✅ Topic "${topicName}" created/found for \`${whatsappJid}\` with ID: \`${topicId}\``);
+                logger.info(`✅ Topic created/found by owner: ${topicName} for ${whatsappJid}`);
+            } else {
+                 await this.bot.sendMessage(chatId, `❌ Failed to create topic for \`${whatsappJid}\`. Check logs for details.`);
+            }
+        } catch (error) {
+            logger.error('❌ Failed to create topic:', error);
+            await this.bot.sendMessage(chatId, `❌ Failed to create topic: ${error.message}`);
+        }
+    }
+
+    async handleDeleteTopic(msg, match) {
+        const chatId = msg.chat.id;
+        if (!this.isOwner(chatId)) {
+            await this.bot.sendMessage(chatId, '🚫 You are not authorized to use this command.');
+            return;
+        }
+        const args = msg.text.split(' ').slice(1);
+        if (args.length === 0) {
+            await this.bot.sendMessage(chatId, '❓ Usage: /deletetopic <WhatsAppJID_or_TopicID>');
+            return;
+        }
+        const identifier = args[0]; 
+
+        try {
+            let deletedCount = 0;
+            // Check if identifier is a JID
+            if (identifier.includes('@s.whatsapp.net')) {
+                const mapping = await this.bridge.collections.chatMappings.findOne({ whatsappJid: identifier });
+                if (mapping) {
+                    await this.bridge.collections.chatMappings.deleteOne({ whatsappJid: identifier });
+                    deletedCount = 1;
+                }
+            } else { // Assume it's a Topic ID
+                const topicId = parseInt(identifier);
+                const mapping = await this.bridge.collections.chatMappings.findOne({ telegramTopicId: topicId });
+                if (mapping) {
+                    await this.bridge.collections.chatMappings.deleteOne({ telegramTopicId: topicId });
+                    deletedCount = 1;
+                }
+            }
+            
+            if (deletedCount > 0) {
+                await this.bridge.loadMappingsFromDb(); // Reload mappings after deletion to update in-memory cache
+                await this.bot.sendMessage(chatId, `✅ Topic mapping for "${identifier}" deleted successfully.`);
+                logger.info(`✅ Topic mapping deleted by owner: ${identifier}`);
+            } else {
+                await this.bot.sendMessage(chatId, `⚠️ Topic mapping for "${identifier}" not found.`);
+            }
+        } catch (error) {
+            logger.error('❌ Failed to delete topic:', error);
+            await this.bot.sendMessage(chatId, `❌ Failed to delete topic: ${error.message}`);
         }
     }
 }
