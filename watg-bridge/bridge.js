@@ -26,7 +26,7 @@ class TelegramBridge {
         this.presenceTimeout = null;
         this.botChatId = null;
         this.db = null;
-        this.collections = {};
+        this.collection = null;
     }
 
     async initialize() {
@@ -34,15 +34,12 @@ class TelegramBridge {
         const chatId = config.get('telegram.chatId');
         
         if (!token || token.includes('YOUR_BOT_TOKEN') || !chatId || chatId.includes('YOUR_CHAT_ID')) {
-            logger.warn('⚠️ Telegram bot token or chat ID not configured properly');
+            logger.warn('⚠️ Telegram bot token or chat ID not configured');
             return;
         }
 
         try {
-            // Initialize database
             await this.initializeDatabase();
-            
-            // Ensure temp directory exists
             await fs.ensureDir(this.tempDir);
             
             this.telegramBot = new TelegramBot(token, { 
@@ -50,9 +47,8 @@ class TelegramBridge {
                 onlyFirstMatch: true
             });
             
-            // Initialize commands handler
             this.commands = new TelegramCommands(this);
-            
+            await this.commands.registerBotCommands();
             await this.setupTelegramHandlers();
             await this.loadMappingsFromDb();
             await this.syncContacts();
@@ -66,21 +62,11 @@ class TelegramBridge {
     async initializeDatabase() {
         try {
             this.db = await connectDb();
-            
-            // Initialize collections
-            this.collections = {
-                chatMappings: this.db.collection('telegram_chat_mappings'),
-                userMappings: this.db.collection('telegram_user_mappings'),
-                contactMappings: this.db.collection('telegram_contact_mappings'),
-                bridgeSettings: this.db.collection('telegram_bridge_settings')
-            };
-
-            // Create indexes for better performance
-            await this.collections.chatMappings.createIndex({ whatsappJid: 1 }, { unique: true });
-            await this.collections.userMappings.createIndex({ whatsappId: 1 }, { unique: true });
-            await this.collections.contactMappings.createIndex({ phone: 1 }, { unique: true });
-
-            logger.info('📊 Database initialized for Telegram bridge');
+            this.collection = this.db.collection('bridge');
+            await this.collection.createIndex({ type: 1, 'data.whatsappJid': 1 }, { unique: true, partialFilterExpression: { type: 'chat' } });
+            await this.collection.createIndex({ type: 1, 'data.whatsappId': 1 }, { unique: true, partialFilterExpression: { type: 'user' } });
+            await this.collection.createIndex({ type: 1, 'data.phone': 1 }, { unique: true, partialFilterExpression: { type: 'contact' } });
+            logger.info('📊 Database initialized for Telegram bridge (single collection: bridge)');
         } catch (error) {
             logger.error('❌ Failed to initialize database:', error);
         }
@@ -88,45 +74,46 @@ class TelegramBridge {
 
     async loadMappingsFromDb() {
         try {
-            // Load chat mappings
-            const chatMappings = await this.collections.chatMappings.find({}).toArray();
-            for (const mapping of chatMappings) {
-                this.chatMappings.set(mapping.whatsappJid, mapping.telegramTopicId);
+            const mappings = await this.collection.find({}).toArray();
+            
+            for (const mapping of mappings) {
+                switch (mapping.type) {
+                    case 'chat':
+                        this.chatMappings.set(mapping.data.whatsappJid, mapping.data.telegramTopicId);
+                        break;
+                    case 'user':
+                        this.userMappings.set(mapping.data.whatsappId, {
+                            name: mapping.data.name,
+                            phone: mapping.data.phone,
+                            firstSeen: mapping.data.firstSeen,
+                            messageCount: mapping.data.messageCount || 0
+                        });
+                        break;
+                    case 'contact':
+                        this.contactMappings.set(mapping.data.phone, mapping.data.name);
+                        break;
+                }
             }
-
-            // Load user mappings
-            const userMappings = await this.collections.userMappings.find({}).toArray();
-            for (const mapping of userMappings) {
-                this.userMappings.set(mapping.whatsappId, {
-                    name: mapping.name,
-                    phone: mapping.phone,
-                    firstSeen: mapping.firstSeen,
-                    messageCount: mapping.messageCount || 0
-                });
-            }
-
-            // Load contact mappings
-            const contactMappings = await this.collections.contactMappings.find({}).toArray();
-            for (const mapping of contactMappings) {
-                this.contactMappings.set(mapping.phone, mapping.name);
-            }
-
-            logger.info(`📊 Loaded mappings from DB: ${this.chatMappings.size} chats, ${this.userMappings.size} users, ${this.contactMappings.size} contacts`);
+            
+            logger.info(`📊 Loaded mappings: ${this.chatMappings.size} chats, ${this.userMappings.size} users, ${this.contactMappings.size} contacts`);
         } catch (error) {
-            logger.error('❌ Failed to load mappings from database:', error);
+            logger.error('❌ Failed to load mappings:', error);
         }
     }
 
     async saveChatMapping(whatsappJid, telegramTopicId) {
         try {
-            await this.collections.chatMappings.updateOne(
-                { whatsappJid },
+            await this.collection.updateOne(
+                { type: 'chat', 'data.whatsappJid': whatsappJid },
                 { 
                     $set: { 
-                        whatsappJid, 
-                        telegramTopicId, 
-                        createdAt: new Date(),
-                        lastActivity: new Date()
+                        type: 'chat',
+                        data: { 
+                            whatsappJid, 
+                            telegramTopicId, 
+                            createdAt: new Date(),
+                            lastActivity: new Date()
+                        } 
                     } 
                 },
                 { upsert: true }
@@ -139,16 +126,19 @@ class TelegramBridge {
 
     async saveUserMapping(whatsappId, userData) {
         try {
-            await this.collections.userMappings.updateOne(
-                { whatsappId },
+            await this.collection.updateOne(
+                { type: 'user', 'data.whatsappId': whatsappId },
                 { 
                     $set: { 
-                        whatsappId,
-                        name: userData.name,
-                        phone: userData.phone,
-                        firstSeen: userData.firstSeen,
-                        messageCount: userData.messageCount || 0,
-                        lastSeen: new Date()
+                        type: 'user',
+                        data: { 
+                            whatsappId,
+                            name: userData.name,
+                            phone: userData.phone,
+                            firstSeen: userData.firstSeen,
+                            messageCount: userData.messageCount || 0,
+                            lastSeen: new Date()
+                        } 
                     } 
                 },
                 { upsert: true }
@@ -161,13 +151,16 @@ class TelegramBridge {
 
     async saveContactMapping(phone, name) {
         try {
-            await this.collections.contactMappings.updateOne(
-                { phone },
+            await this.collection.updateOne(
+                { type: 'contact', 'data.phone': phone },
                 { 
                     $set: { 
-                        phone, 
-                        name, 
-                        updatedAt: new Date() 
+                        type: 'contact',
+                        data: { 
+                            phone, 
+                            name, 
+                            updatedAt: new Date() 
+                        } 
                     } 
                 },
                 { upsert: true }
@@ -175,6 +168,64 @@ class TelegramBridge {
             this.contactMappings.set(phone, name);
         } catch (error) {
             logger.error('❌ Failed to save contact mapping:', error);
+        }
+    }
+
+    async saveMappingsToDb() {
+        try {
+            const bulkOps = [];
+
+            for (const [whatsappJid, telegramTopicId] of this.chatMappings) {
+                bulkOps.push({
+                    updateOne: {
+                        filter: { type: 'chat', 'data.whatsappJid': whatsappJid },
+                        update: { 
+                            $set: { 
+                                type: 'chat',
+                                data: { whatsappJid, telegramTopicId, createdAt: new Date(), lastActivity: new Date() }
+                            }
+                        },
+                        upsert: true
+                    }
+                });
+            }
+
+            for (const [whatsappId, userData] of this.userMappings) {
+                bulkOps.push({
+                    updateOne: {
+                        filter: { type: 'user', 'data.whatsappId': whatsappId },
+                        update: { 
+                            $set: { 
+                                type: 'user',
+                                data: { ...userData, lastSeen: new Date() }
+                            }
+                        },
+                        upsert: true
+                    }
+                });
+            }
+
+            for (const [phone, name] of this.contactMappings) {
+                bulkOps.push({
+                    updateOne: {
+                        filter: { type: 'contact', 'data.phone': phone },
+                        update: { 
+                            $set: { 
+                                type: 'contact',
+                                data: { phone, name, updatedAt: new Date() }
+                            }
+                        },
+                        upsert: true
+                    }
+                });
+            }
+
+            if (bulkOps.length > 0) {
+                await this.collection.bulkWrite(bulkOps);
+                logger.info(`📊 Saved ${bulkOps.length} mappings to bridge collection`);
+            }
+        } catch (error) {
+            logger.error('❌ Failed to save mappings:', error);
         }
     }
 
@@ -201,7 +252,6 @@ class TelegramBridge {
             
             logger.info(`✅ Synced ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
             await this.updateTopicNames();
-            
         } catch (error) {
             logger.error('❌ Failed to sync contacts:', error);
         }
@@ -242,7 +292,7 @@ class TelegramBridge {
                 reaction: [{ type: 'emoji', emoji }]
             });
         } catch (err) {
-            logger.debug('❌ Failed to set reaction via HTTP API:', err?.response?.data?.description || err.message);
+            logger.debug('❌ Failed to set reaction:', err?.response?.data?.description || err.message);
         }
     }
 
@@ -306,7 +356,6 @@ class TelegramBridge {
         await this.createUserMapping(participant, whatsappMsg);
         const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
         
-        // Handle video notes specifically
         if (whatsappMsg.message?.videoMessage?.ptv) {
             await this.handleWhatsAppMedia(whatsappMsg, 'video_note', topicId);
         } else if (whatsappMsg.message?.imageMessage) {
@@ -341,7 +390,6 @@ class TelegramBridge {
 
     async createUserMapping(participant, whatsappMsg) {
         if (this.userMappings.has(participant)) {
-            // Update message count
             const userData = this.userMappings.get(participant);
             userData.messageCount = (userData.messageCount || 0) + 1;
             await this.saveUserMapping(participant, userData);
@@ -379,7 +427,7 @@ class TelegramBridge {
 
         const chatId = config.get('telegram.chatId');
         if (!chatId || chatId.includes('YOUR_CHAT_ID')) {
-            logger.error('❌ Telegram chat ID not configured properly');
+            logger.error('❌ Telegram chat ID not configured');
             return null;
         }
 
@@ -607,7 +655,7 @@ class TelegramBridge {
             if (sender.endsWith('@g.us') && participant !== sender) {
                 const senderPhone = participant.split('@')[0];
                 const senderName = this.contactMappings.get(senderPhone) || senderPhone;
-                caption = `👤 ${senderName}:\n${caption}`;
+                caption = `👤 ${senderName}:\n${caption || ''}`;
             }
 
             const chatId = config.get('telegram.chatId');
@@ -1017,7 +1065,7 @@ class TelegramBridge {
                         setTimeout(() => fs.unlink(convertedPath).catch(() => {}), 5000);
 
                     } catch (conversionError) {
-                        logger.warn('🧊 Sticker conversion failed, sending as image fallback');
+                        logger.warn('🧊 Sticker conversion failed, sending as image');
 
                         messageOptions = {
                             image: fs.readFileSync(filePath),
@@ -1039,7 +1087,7 @@ class TelegramBridge {
                     await this.markAsRead(whatsappJid, [sendResult.key]);
                 }, 1000);
             } else {
-                logger.warn(`⚠️ Failed to send ${mediaType} to WhatsApp - no message ID returned`);
+                logger.warn(`⚠️ Failed to send ${mediaType} to WhatsApp - no message ID`);
                 await this.setReaction(msg.chat.id, msg.message_id, '❌');
             }
 
@@ -1185,7 +1233,7 @@ class TelegramBridge {
         }
     }
 
-    setupWhatsAppHandlers() {
+    async setupWhatsAppHandlers() {
         if (!this.whatsappBot.sock) return;
 
         this.whatsappBot.sock.ev.on('call', async (calls) => {
