@@ -51,7 +51,11 @@ class TelegramBridge {
             await this.commands.registerBotCommands();
             await this.setupTelegramHandlers();
             await this.loadMappingsFromDb();
-            await this.syncContacts();
+            
+            if (config.get('telegram.autoSyncContacts') !== false) {
+                await this.syncContacts();
+                await this.updateTopicNames();
+            }
             
             logger.info('✅ Telegram bridge initialized');
         } catch (error) {
@@ -62,6 +66,8 @@ class TelegramBridge {
     async initializeDatabase() {
         try {
             this.db = await connectDb();
+            await this.db.command({ ping: 1 });
+            logger.info('✅ MongoDB connection successful');
             this.collection = this.db.collection('bridge');
             await this.collection.createIndex({ type: 1, 'data.whatsappJid': 1 }, { unique: true, partialFilterExpression: { type: 'chat' } });
             await this.collection.createIndex({ type: 1, 'data.whatsappId': 1 }, { unique: true, partialFilterExpression: { type: 'user' } });
@@ -119,6 +125,7 @@ class TelegramBridge {
                 { upsert: true }
             );
             this.chatMappings.set(whatsappJid, telegramTopicId);
+            logger.debug(`✅ Saved chat mapping: ${whatsappJid} -> ${telegramTopicId}`);
         } catch (error) {
             logger.error('❌ Failed to save chat mapping:', error);
         }
@@ -144,6 +151,7 @@ class TelegramBridge {
                 { upsert: true }
             );
             this.userMappings.set(whatsappId, userData);
+            logger.debug(`✅ Saved user mapping: ${whatsappId} (${userData.name || userData.phone})`);
         } catch (error) {
             logger.error('❌ Failed to save user mapping:', error);
         }
@@ -166,6 +174,7 @@ class TelegramBridge {
                 { upsert: true }
             );
             this.contactMappings.set(phone, name);
+            logger.debug(`✅ Saved contact mapping: ${phone} -> ${name}`);
         } catch (error) {
             logger.error('❌ Failed to save contact mapping:', error);
         }
@@ -231,27 +240,43 @@ class TelegramBridge {
 
     async syncContacts() {
         try {
-            if (!this.whatsappBot.sock) return;
+            if (!this.whatsappBot.sock) {
+                logger.error('❌ WhatsApp socket not available for contact sync');
+                return;
+            }
             
             logger.info('📞 Syncing contacts...');
+            logger.debug('🔍 Checking WhatsApp connection:', this.whatsappBot.sock.user ? 'Connected' : 'Disconnected');
             
             const contacts = await this.whatsappBot.sock.getContacts();
+            logger.debug(`🔍 Retrieved ${contacts?.length || 0} contacts from WhatsApp`);
+            
+            if (!Array.isArray(contacts)) {
+                logger.error('❌ Contacts data is not an array:', contacts);
+                return;
+            }
+
             let syncedCount = 0;
             
             for (const contact of contacts) {
-                if (contact.id && contact.name) {
-                    const phone = contact.id.split('@')[0];
-                    const existingName = this.contactMappings.get(phone);
-                    
-                    if (existingName !== contact.name) {
-                        await this.saveContactMapping(phone, contact.name);
-                        syncedCount++;
-                    }
+                if (!contact?.id || !contact?.name) {
+                    logger.warn(`⚠️ Skipping invalid contact: ${JSON.stringify(contact)}`);
+                    continue;
+                }
+                
+                const phone = contact.id.split('@')[0];
+                const existingName = this.contactMappings.get(phone);
+                
+                if (existingName !== contact.name) {
+                    await this.saveContactMapping(phone, contact.name);
+                    syncedCount++;
                 }
             }
             
             logger.info(`✅ Synced ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
-            await this.updateTopicNames();
+            if (config.get('telegram.autoSyncContacts') !== false) {
+                await this.updateTopicNames();
+            }
         } catch (error) {
             logger.error('❌ Failed to sync contacts:', error);
         }
@@ -260,24 +285,33 @@ class TelegramBridge {
     async updateTopicNames() {
         try {
             const chatId = config.get('telegram.chatId');
+            if (!chatId || chatId.includes('YOUR_CHAT_ID')) {
+                logger.error('❌ Invalid telegram.chatId for updating topic names');
+                return;
+            }
+            
+            logger.info('📝 Updating Telegram topic names...');
+            let updatedCount = 0;
             
             for (const [jid, topicId] of this.chatMappings.entries()) {
                 if (!jid.endsWith('@g.us') && jid !== 'status@broadcast' && jid !== 'call@broadcast') {
                     const phone = jid.split('@')[0];
-                    const contactName = this.contactMappings.get(phone);
+                    const contactName = this.contactMappings.get(phone) || `+${phone}`;
                     
-                    if (contactName) {
-                        try {
-                            await this.telegramBot.editForumTopic(chatId, topicId, {
-                                name: contactName
-                            });
-                            logger.debug(`📝 Updated topic name for ${phone} to ${contactName}`);
-                        } catch (error) {
-                            logger.debug(`Could not update topic name for ${phone}:`, error);
-                        }
+                    try {
+                        await this.telegramBot.editForumTopic(chatId, topicId, {
+                            name: contactName
+                        });
+                        logger.debug(`📝 Updated topic name for ${phone} to ${contactName}`);
+                        updatedCount++;
+                    } catch (error) {
+                        logger.error(`❌ Failed to update topic ${topicId} for ${phone}:`, error);
                     }
+                    await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit
                 }
             }
+            
+            logger.info(`✅ Updated ${updatedCount} topic names`);
         } catch (error) {
             logger.error('❌ Failed to update topic names:', error);
         }
@@ -451,19 +485,15 @@ class TelegramBridge {
                     topicName = `${groupMeta.subject}`;
                 } catch (error) {
                     topicName = `Group Chat`;
+                    logger.debug(`Could not fetch group metadata for ${chatJid}:`, error);
                 }
                 iconColor = 0x6FB9F0;
             } else {
                 const phone = chatJid.split('@')[0];
                 const contactName = this.contactMappings.get(phone);
-                
-                if (contactName) {
-                    topicName = contactName;
-                } else {
-                    const participant = whatsappMsg.key.participant || chatJid;
-                    const userInfo = this.userMappings.get(participant);
-                    topicName = userInfo?.name || `+${phone}`;
-                }
+                const participant = whatsappMsg.key.participant || chatJid;
+                const userInfo = this.userMappings.get(participant);
+                topicName = contactName || `+${phone}`;
             }
 
             const topic = await this.telegramBot.createForumTopic(chatId, topicName, {
@@ -471,10 +501,10 @@ class TelegramBridge {
             });
 
             await this.saveChatMapping(chatJid, topic.message_thread_id);
-            logger.info(`🆕 Created Telegram topic: ${topicName} (ID: ${topic.message_thread_id})`);
+            logger.info(`🆕 Created Telegram topic: ${topicName} (ID: ${topic.message_thread_id}) for ${chatJid}`);
             
             if (!isStatus && !isCall) {
-                await this.sendWelcomeMessage(topic.message_thread_id, chatJid, isGroup);
+                await this.sendWelcomeMessage(topic.message_thread_id, chatJid, isGroup, whatsappMsg);
             }
             
             return topic.message_thread_id;
@@ -484,9 +514,15 @@ class TelegramBridge {
         }
     }
 
-    async sendWelcomeMessage(topicId, jid, isGroup) {
+    async sendWelcomeMessage(topicId, jid, isGroup, whatsappMsg) {
         try {
             const chatId = config.get('telegram.chatId');
+            const phone = jid.split('@')[0];
+            const contactName = this.contactMappings.get(phone) || `+${phone}`;
+            const participant = whatsappMsg.key.participant || jid;
+            const userInfo = this.userMappings.get(participant);
+            const handleName = whatsappMsg.pushName || userInfo?.name || 'Unknown';
+            
             let welcomeText = '';
             
             if (isGroup) {
@@ -500,14 +536,13 @@ class TelegramBridge {
                                  `💬 Messages from this group will appear here`;
                 } catch (error) {
                     welcomeText = `🏷️ **Group Chat**\n\n💬 Messages from this group will appear here`;
+                    logger.debug(`Could not fetch group metadata for ${jid}:`, error);
                 }
             } else {
-                const phone = jid.split('@')[0];
-                const contactName = this.contactMappings.get(phone);
-                
                 welcomeText = `👤 **Contact Information**\n\n` +
-                             `📝 **Name:** ${contactName || 'Not in contacts'}\n` +
+                             `📝 **Name:** ${contactName}\n` +
                              `📱 **Phone:** +${phone}\n` +
+                             `🖐️ **Handle:** ${handleName}\n` +
                              `🆔 **WhatsApp ID:** \`${jid}\`\n` +
                              `📅 **First Contact:** ${new Date().toLocaleDateString()}\n\n` +
                              `💬 Messages with this contact will appear here`;
@@ -1243,29 +1278,36 @@ class TelegramBridge {
         });
 
         this.whatsappBot.sock.ev.on('contacts.update', async (contacts) => {
-            for (const contact of contacts) {
-                if (contact.id && contact.name) {
-                    const phone = contact.id.split('@')[0];
-                    const oldName = this.contactMappings.get(phone);
-                    
-                    if (oldName !== contact.name) {
-                        await this.saveContactMapping(phone, contact.name);
-                        logger.info(`📞 Updated contact: ${phone} -> ${contact.name}`);
+            try {
+                let updatedCount = 0;
+                for (const contact of contacts) {
+                    if (contact.id && contact.name) {
+                        const phone = contact.id.split('@')[0];
+                        const oldName = this.contactMappings.get(phone);
                         
-                        const jid = contact.id;
-                        if (this.chatMappings.has(jid)) {
-                            const topicId = this.chatMappings.get(jid);
-                            try {
-                                await this.telegramBot.editForumTopic(config.get('telegram.chatId'), topicId, {
-                                    name: contact.name
-                                });
-                                logger.info(`📝 Updated topic name for ${phone} to ${contact.name}`);
-                            } catch (error) {
-                                logger.debug(`Could not update topic name for ${phone}:`, error);
+                        if (oldName !== contact.name) {
+                            await this.saveContactMapping(phone, contact.name);
+                            logger.info(`📞 Updated contact: ${phone} -> ${contact.name}`);
+                            updatedCount++;
+                            
+                            const jid = contact.id;
+                            if (this.chatMappings.has(jid)) {
+                                const topicId = this.chatMappings.get(jid);
+                                try {
+                                    await this.telegramBot.editForumTopic(config.get('telegram.chatId'), topicId, {
+                                        name: contact.name
+                                    });
+                                    logger.info(`📝 Updated topic name for ${phone} to ${contact.name}`);
+                                } catch (error) {
+                                    logger.debug(`Could not update topic name for ${phone}:`, error);
+                                }
                             }
                         }
                     }
                 }
+                logger.info(`✅ Processed ${updatedCount} contact updates`);
+            } catch (error) {
+                logger.error('❌ Failed to process contact updates:', error);
             }
         });
 
