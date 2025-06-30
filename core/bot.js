@@ -1,32 +1,40 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs-extra');
+const path = require('path');
 
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const ModuleManager = require('./module-loader');
-const TelegramBridge = require('./bridge');
-const db = require('../utils/db');
+const TelegramBridge = require('../modules/telegram-bridge');
+const { connectDb } = require('../db');
+const ModuleLoader = require('./module-loader'); // <== Import ModuleLoader
 
 class AdvancedWhatsAppBot {
     constructor() {
         this.sock = null;
         this.authPath = './auth_info';
         this.messageHandler = new MessageHandler(this);
-        this.moduleManager = new ModuleManager(this);
         this.telegramBridge = null;
         this.isShuttingDown = false;
+        this.db = null;
+        this.moduleLoader = new ModuleLoader(this);
     }
 
     async initialize() {
-        logger.info('🔧 Initializing NexusWA Bot...');
+        logger.info('🔧 Initializing Advanced WhatsApp Bot...');
         
-        // Connect to database
-        await db.connect();
-        
-        // Load modules
-        await this.moduleManager.initialize();
+        // Connect to the database
+        try {
+            this.db = await connectDb();
+            logger.info('✅ Database connected successfully!');
+        } catch (error) {
+            logger.error('❌ Failed to connect to database:', error);
+            process.exit(1);
+        }
+
+        // Load modules using the ModuleLoader
+        await this.moduleLoader.loadModules(); // <== Use the ModuleLoader
         
         // Initialize Telegram bridge if enabled
         if (config.get('telegram.enabled') && config.get('telegram.botToken')) {
@@ -37,7 +45,7 @@ class AdvancedWhatsAppBot {
         // Start WhatsApp connection
         await this.startWhatsApp();
         
-        logger.info('✅ NexusWA Bot initialized successfully!');
+        logger.info('✅ Bot initialized successfully!');
     }
 
     async startWhatsApp() {
@@ -62,11 +70,6 @@ class AdvancedWhatsAppBot {
             if (qr) {
                 logger.info('📱 Scan QR code with WhatsApp:');
                 qrcode.generate(qr, { small: true });
-                
-                // Send QR to Telegram if bridge is active
-                if (this.telegramBridge) {
-                    await this.telegramBridge.sendQRToBot(qr);
-                }
             }
             
             if (connection === 'close') {
@@ -85,11 +88,6 @@ class AdvancedWhatsAppBot {
 
         this.sock.ev.on('creds.update', saveCreds);
         this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
-        
-        // Setup Telegram bridge handlers
-        if (this.telegramBridge) {
-            this.telegramBridge.setupWhatsAppHandlers();
-        }
     }
 
     async onConnectionOpen() {
@@ -101,7 +99,7 @@ class AdvancedWhatsAppBot {
             logger.info(`👑 Owner set to: ${this.sock.user.id}`);
         }
 
-        // Send startup message
+        // Send startup message to owner
         await this.sendStartupMessage();
         
         // Initialize Telegram bridge connection
@@ -114,18 +112,22 @@ class AdvancedWhatsAppBot {
         const owner = config.get('bot.owner');
         if (!owner) return;
 
-        const moduleStats = this.moduleManager.getModuleStats();
         const startupMessage = `🚀 *${config.get('bot.name')} v${config.get('bot.version')}* is now online!\n\n` +
-                              `📦 *Modules Loaded:*\n` +
-                              `• System: ${moduleStats.system}\n` +
-                              `• Custom: ${moduleStats.custom}\n` +
-                              `• Total: ${moduleStats.total}\n\n` +
-                              `🤖 Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
-                              `🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n\n` +
-                              `Type *${config.get('bot.prefix')}help* to see all commands!`;
+                              `🔥 *Advanced Features Active:*\n` +
+                              `• 📱 Modular Architecture\n` +
+                              `• 🤖 Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
+                              `• 🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
+                              `• 🔧 Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n` +
+                              `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n\n` +
+                              `Type *${config.get('bot.prefix')}menu* to see all commands!`;
 
         try {
             await this.sock.sendMessage(owner, { text: startupMessage });
+            
+            // Also log to Telegram
+            if (this.telegramBridge) {
+                await this.telegramBridge.logToTelegram('🚀 WhatsApp Bot Started', startupMessage);
+            }
         } catch (error) {
             logger.error('Failed to send startup message:', error);
         }
@@ -150,7 +152,6 @@ class AdvancedWhatsAppBot {
             await this.sock.end();
         }
         
-        await db.disconnect();
         logger.info('✅ Bot shutdown complete');
     }
 }
