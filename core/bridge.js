@@ -29,6 +29,7 @@ class TelegramBridge {
         this.db = null; // MongoDB database instance
         this.collections = {}; // To hold references to MongoDB collections
         this.startTime = Date.now(); // For uptime
+        this.bridgeActive = true; // Bridge starts as active by default
     }
 
     async initialize(dbInstance) {
@@ -75,6 +76,9 @@ class TelegramBridge {
                 await this.telegramBot.setWebhook(webhookUrl);
                 logger.info(`🌍 Telegram webhook set to ${webhookUrl}`);
             }
+
+            // Create temp directory if it doesn't exist
+            await fs.ensureDir(this.tempDir);
 
             // Sync contacts on startup
             await this.syncContacts(); // Initial sync of contacts
@@ -157,18 +161,13 @@ class TelegramBridge {
         }
         // Try to get from WhatsApp directly if not in cache
         try {
-            const waContact = await this.whatsappBot.sock.contacts[jid];
-            if (waContact && waContact.name) {
-                this.saveContactMapping(jid, waContact.name, waContact.id.split('@')[0]); // Save for future use
-                return waContact.name;
-            }
-            if (waContact && waContact.verifiedName) { // Fallback to verified name
-                this.saveContactMapping(jid, waContact.verifiedName, waContact.id.split('@')[0]);
-                return waContact.verifiedName;
-            }
-            if (waContact && waContact.notify) { // Fallback to pushName/notify
-                this.saveContactMapping(jid, waContact.notify, waContact.id.split('@')[0]);
-                return waContact.notify;
+            const waContact = this.whatsappBot.sock.contacts[jid];
+            if (waContact) {
+                const name = waContact.name || waContact.verifiedName || waContact.notify;
+                if (name) {
+                    this.saveContactMapping(jid, name, waContact.id.split('@')[0]); // Save for future use
+                    return name;
+                }
             }
         } catch (e) {
             logger.debug(`Could not get contact name for ${jid} from WhatsApp store: ${e.message}`);
@@ -178,7 +177,7 @@ class TelegramBridge {
         return jid.split('@')[0];
     }
 
-    async getOrCreateTopic(whatsappJid, { pushName = '', isGroup = false } = {}) {
+    async getOrCreateTopic(whatsappJid, { initialPushName = '', isGroup = false } = {}) {
         const telegramChatId = config.get('telegram.chatId');
         if (!telegramChatId) {
             logger.warn('⚠️ Telegram target chat ID not set. Cannot create or retrieve topic.');
@@ -187,12 +186,16 @@ class TelegramBridge {
 
         let topicId = this.chatMappings.get(whatsappJid);
 
-        if (!topicId) {
-            // Get a display name for the topic
-            const displayName = isGroup 
-                ? pushName // For groups, use the group name provided
-                : await this.getContactDisplayName(whatsappJid); // For private chats, use contact name
+        // Determine the display name for the topic
+        let displayName = await this.getContactDisplayName(whatsappJid);
+        if (!displayName && initialPushName) {
+            displayName = initialPushName; // Use provided pushName if no contact name
+        }
+        if (!displayName) {
+            displayName = whatsappJid.split('@')[0]; // Fallback to number if nothing else
+        }
 
+        if (!topicId) {
             logger.info(`Creating new topic for ${displayName} (${whatsappJid})...`);
             try {
                 // Ensure the main chat ID is a supergroup and supports topics
@@ -210,7 +213,6 @@ class TelegramBridge {
 
             } catch (error) {
                 logger.error(`❌ Failed to create Telegram topic for ${whatsappJid}:`, error);
-                // Specifically check for FORUM_BOT_NOT_AN_ADMIN or TOPIC_CLOSED etc.
                 if (error.response && error.response.body && error.response.body.description) {
                     if (error.response.body.description.includes('forum topic support is not enabled')) {
                         logger.error('❗️ Telegram group does not have forum topics enabled. Please enable them in group settings.');
@@ -225,12 +227,14 @@ class TelegramBridge {
         } else {
             // Update topic name if contact name has changed or for group names
             const currentTopicName = await this.getContactDisplayName(whatsappJid);
-            try {
-                await this.telegramBot.editForumTopic(telegramChatId, topicId, { name: currentTopicName });
-                logger.debug(`📝 Updated topic name for ${whatsappJid} to ${currentTopicName}`);
-            } catch (error) {
-                // This can fail if topic is closed, or if name hasn't changed. Log as debug.
-                logger.debug(`Could not update topic name for ${whatsappJid}: ${error.message}`);
+            if (currentTopicName && currentTopicName !== displayName) { // Only update if name is different
+                try {
+                    await this.telegramBot.editForumTopic(telegramChatId, topicId, { name: currentTopicName });
+                    logger.debug(`📝 Updated topic name for ${whatsappJid} to ${currentTopicName}`);
+                } catch (error) {
+                    // This can fail if topic is closed, or if name hasn't changed. Log as debug.
+                    logger.debug(`Could not update topic name for ${whatsappJid}: ${error.message}`);
+                }
             }
         }
         return topicId;
@@ -260,15 +264,15 @@ class TelegramBridge {
             const isGroup = remoteJid.endsWith('@g.us');
             
             // Determine the JID for topic creation:
-            // If it's a group message, the topic is for the group itself.
-            // If it's a private message, the topic is for the private chat partner.
+            // If it's a group message, the topic is for the group itself (remoteJid).
+            // If it's a private message, the topic is for the person sending the message (senderJid).
             const whatsappJidForTopic = isGroup ? remoteJid : senderJid;
 
             const senderName = m.pushName || (await this.getContactDisplayName(senderJid)); // Get display name for message content
 
             // Get or create the Telegram topic for this WhatsApp JID
             const telegramTopicId = await this.getOrCreateTopic(whatsappJidForTopic, { 
-                pushName: await this.getContactDisplayName(whatsappJidForTopic), // Use contact name for topic name
+                initialPushName: m.pushName, // Pass pushName as a hint for topic creation
                 isGroup: isGroup 
             });
 
@@ -287,11 +291,9 @@ class TelegramBridge {
             const message = m.message;
             if (message.conversation || message.extendedTextMessage?.text) {
                 messageContent = message.conversation || message.extendedTextMessage.text;
-                if (m.key.fromMe) { // If sent by the bot's own WhatsApp number (e.g., from an initial WA message)
-                    const ownerName = config.get('bot.name') || 'You';
-                    messageContent = `*${ownerName}:* ${messageContent}`; // Prefix with owner's name
-                } else {
-                     messageContent = `*${senderName}:* ${messageContent}`; // Prefix with sender's name
+                // Prepend sender's name unless it's a message from the bot's own number
+                if (!m.key.fromMe) { 
+                     messageContent = `*${senderName}:* ${messageContent}`;
                 }
                
             } else if (message.imageMessage) {
@@ -309,8 +311,8 @@ class TelegramBridge {
                 fileName = `${m.key.id}.${mime.extension(mimeType)}`;
                 messageContent = `📹 *${senderName}* (Video)`;
 
-                // Bug Fix: Handle Video Notes
-                if (message.videoMessage.seconds < 60 && message.videoMessage.ptt) { // Heuristic for video notes
+                // Bug Fix: Handle Video Notes (videoMessage with ptt: true and short duration)
+                if (message.videoMessage.seconds <= 60 && message.videoMessage.ptt) { // Heuristic for video notes
                     mediaType = 'video_note';
                     messageContent = `🎥 *${senderName}* (Video Note)`;
                 }
@@ -391,6 +393,7 @@ class TelegramBridge {
                             });
                             break;
                         case 'video_note': // NEW: Handle video notes
+                            // Telegram's sendVideoNote is for short circular videos
                             await this.telegramBot.sendVideoNote(telegramChatId, filePath, {
                                 message_thread_id: telegramTopicId
                             });
@@ -470,21 +473,18 @@ class TelegramBridge {
             // Find WhatsApp JID from chatMappings based on Telegram Topic ID
             targetWhatsappJid = Array.from(this.chatMappings.entries())
                                     .find(([jid, topicId]) => topicId === telegramTopicId)?.[0];
-        } else if (msg.chat.type === 'private') {
-            // If it's a private chat with the bot, and not a reply in a topic
-            // This is primarily for the owner to send messages
-            targetWhatsappJid = this.userMappings.get(msg.from.id); // For direct private messages to bot
-            if (!targetWhatsappJid) {
-                // If no user mapping exists, use the bot owner's WA JID if available
-                targetWhatsappJid = config.get('whatsapp.ownerJid'); // Assuming you have this config
-            }
+        } else if (msg.chat.type === 'private' && this.isOwner(msg.from.id)) { // Allow owner to send direct messages to bot's linked WhatsApp
+             targetWhatsappJid = this.userMappings.get(msg.from.id);
+             if (!targetWhatsappJid) {
+                targetWhatsappJid = config.get('whatsapp.ownerJid'); // Fallback to configured ownerJid
+             }
         }
 
         if (!targetWhatsappJid) {
             logger.warn(`⚠️ Could not determine target WhatsApp JID for Telegram message from chat ${msg.chat.id}, topic ${telegramTopicId}.`);
             if (msg.chat.type !== 'private' && telegramTopicId) { // Only send warning to topic if it's a topic
                 await this.telegramBot.sendMessage(msg.chat.id, '❌ Could not find a linked WhatsApp chat for this topic.', { message_thread_id: telegramTopicId });
-            } else if (msg.chat.type === 'private' && this.isOwner(msg.from.id)) { // Warn owner in private chat
+            } else if (msg.chat.type === 'private' && this.commands.isOwner(msg.from.id)) { // Warn owner in private chat
                  await this.telegramBot.sendMessage(msg.chat.id, '❌ Could not find a linked WhatsApp chat for this message. Use /send <number> <message> to initiate or respond in a bridged topic.', { parse_mode: 'Markdown' });
             }
             return;
@@ -501,7 +501,7 @@ class TelegramBridge {
             // If it's a reply to a message from the bot within a topic, forward it to WhatsApp
             if (telegramTopicId && isReply) {
                  messageContent = msg.text;
-            } else if (msg.chat.type === 'private') { // Allow direct private messages from owner
+            } else if (msg.chat.type === 'private' && this.commands.isOwner(msg.from.id)) { // Allow direct private messages from owner
                 messageContent = msg.text;
             } else {
                 // Ignore non-reply text messages in a bridged topic/group to prevent endless loops or unwanted forwards
@@ -679,18 +679,71 @@ class TelegramBridge {
     setupWhatsAppHandlers() {
         const sock = this.whatsappBot.sock;
 
-        // Message Listener
+        // Message Listener (for new messages)
         sock.ev.on('messages.upsert', async (m) => {
-            if (m.messages[0].key.fromMe) {
-                // Ignore messages sent by ourselves if not explicitly for bridging (e.g., from /send command)
-                // However, we need to handle sent messages if they are replies to existing WA messages
-                // or if they are the initial message to a new contact that should create a topic.
-                // For now, focus on incoming messages.
-                logger.debug('Ignoring message from self (WhatsApp):', m.messages[0].key.id);
+            // Process messages not sent by 'fromMe'
+            // If m.key.fromMe is true, it's a message sent by the bot's own WhatsApp number.
+            // We should process it if it's a group message where the bot is a participant
+            // or if it's a message from the bot's own number to a new contact (initial message)
+            // that needs a topic created.
+            // However, typical bridging focuses on messages *from others*.
+            // For now, the existing check `if (m.messages[0].key.fromMe)` handles common cases
+            // where bot-sent messages shouldn't trigger topic creation loops.
+            // Further refinement would be needed if the bot needs to bridge its own outgoing messages.
+            if (m.messages[0].key.fromMe && !m.messages[0].key.remoteJid.endsWith('@g.us')) { // Ignore own private messages
+                logger.debug('Ignoring message from self (WhatsApp private chat):', m.messages[0].key.id);
                 return;
             }
-            // For general incoming messages, process them
+            // For general incoming messages, and for group messages from self, process them
             await this.handleIncomingWhatsAppMessage(m);
+        });
+
+        // NEW: Message Update Listener (for reactions)
+        sock.ev.on('messages.update', async (updates) => {
+            if (!config.get('features.reactionConfirmation')) {
+                logger.debug('Reaction confirmation feature is disabled.');
+                return;
+            }
+            const telegramChatId = config.get('telegram.chatId');
+            if (!telegramChatId) {
+                logger.warn('⚠️ Telegram target chat ID not set. Cannot forward reaction.');
+                return;
+            }
+
+            for (const update of updates) {
+                if (update.update && update.update.reactions && update.update.reactions.length > 0) {
+                    const reaction = update.update.reactions[0]; // Get the latest reaction
+                    const remoteJid = reaction.key.remoteJid; // The chat where the reaction happened
+                    const reactorJid = reaction.key.participant || remoteJid; // Reactor's JID
+
+                    const topicId = this.chatMappings.get(remoteJid);
+                    if (!topicId) {
+                        logger.debug(`Ignoring reaction for non-bridged chat: ${remoteJid}`);
+                        continue;
+                    }
+
+                    const reactorName = await this.getContactDisplayName(reactorJid);
+                    const emoji = reaction.text;
+                    
+                    let reactionMessage = '';
+                    if (emoji) {
+                        reactionMessage = `*${reactorName}* reacted with ${emoji}`;
+                    } else {
+                        reactionMessage = `*${reactorName}* removed a reaction`;
+                    }
+                    
+                    try {
+                        await this.telegramBot.sendMessage(telegramChatId, reactionMessage, {
+                            message_thread_id: topicId,
+                            parse_mode: 'Markdown',
+                            disable_notification: true // Send silently
+                        });
+                        logger.info(`✨ Reaction forwarded to Telegram: ${reactionMessage} in topic ${topicId}`);
+                    } catch (error) {
+                        logger.error(`❌ Failed to forward WhatsApp reaction to Telegram for ${remoteJid}:`, error);
+                    }
+                }
+            }
         });
 
         // WhatsApp connection status updates
@@ -875,18 +928,30 @@ class TelegramBridge {
         }
 
         try {
-            const contacts = await sock.contacts; // Baileys populates sock.contacts from store
-            // Or use sock.groupFetchAllParticipating() for groups
-            
+            // Force fetch contacts to ensure up-to-date list
+            const contacts = await sock.query({
+                tag: 'iq',
+                type: 'get',
+                query: ['query', 'contact'],
+                id: sock.generateMessageTag(),
+            });
+
+            // Process the contacts result (this might vary based on Baileys version)
+            // For typical Baileys usage, sock.contacts should be sufficient after connection
+            // Let's iterate through the store's contacts
             let syncedCount = 0;
-            for (const jid in contacts) {
-                const contact = contacts[jid];
-                if (contact.id.endsWith('@s.whatsapp.net')) { // Only process individual contacts
-                    const displayName = contact.name || contact.verifiedName || contact.notify || contact.id.split('@')[0];
-                    const phoneNumber = contact.id.split('@')[0];
-                    await this.saveContactMapping(contact.id, displayName, phoneNumber);
-                    syncedCount++;
+            if (sock.contacts) {
+                for (const jid in sock.contacts) {
+                    const contact = sock.contacts[jid];
+                    if (contact.id && contact.id.endsWith('@s.whatsapp.net')) { // Only process individual contacts
+                        const displayName = contact.name || contact.verifiedName || contact.notify || contact.id.split('@')[0];
+                        const phoneNumber = contact.id.split('@')[0];
+                        await this.saveContactMapping(contact.id, displayName, phoneNumber);
+                        syncedCount++;
+                    }
                 }
+            } else {
+                logger.warn('⚠️ sock.contacts is not available for sync. Ensure WhatsApp is fully connected.');
             }
             logger.info(`✅ WhatsApp contact sync complete. Synced ${syncedCount} contacts.`);
         } catch (error) {
