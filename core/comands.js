@@ -1,7 +1,6 @@
-const TelegramBot = require('node-telegram-bot-api');
+const TelegramBot = require('node-telegram-bot-api'); // This import is not strictly needed here anymore, but keeping it for context
 const config = require('../config');
-const logger = require('./logger'); // Assuming logger is in the same directory as this file
-const fs = require('fs-extra'); // Required for clearauth command (even if clearauth is removed, fs-extra might be needed for other things, but let's keep it minimal)
+const logger = require('./logger');
 
 class TelegramCommands {
     constructor(bridge) {
