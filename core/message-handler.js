@@ -31,23 +31,37 @@ class MessageHandler {
             return this.handleStatusMessage(msg);
         }
 
-        // Handle regular messages
+        // Extract text from message (including captions)
         const text = this.extractText(msg);
-        if (!text) return;
-
-        // Check if it's a command
+        
+        // Check if it's a command (only for text messages, not media with captions)
         const prefix = config.get('bot.prefix');
-        if (text.startsWith(prefix)) {
+        const isCommand = text && text.startsWith(prefix) && !this.hasMedia(msg);
+        
+        if (isCommand) {
             await this.handleCommand(msg, text);
         } else {
-            // Handle non-command messages (for custom modules)
+            // Handle non-command messages (including media)
             await this.handleNonCommandMessage(msg, text);
         }
 
-        // Sync to Telegram if bridge is active
+        // ALWAYS sync to Telegram if bridge is active (this was the main issue)
         if (this.bot.telegramBridge) {
             await this.bot.telegramBridge.syncMessage(msg, text);
         }
+    }
+
+    // New method to check if message has media
+    hasMedia(msg) {
+        return !!(
+            msg.message?.imageMessage ||
+            msg.message?.videoMessage ||
+            msg.message?.audioMessage ||
+            msg.message?.documentMessage ||
+            msg.message?.stickerMessage ||
+            msg.message?.locationMessage ||
+            msg.message?.contactMessage
+        );
     }
 
     async handleStatusMessage(msg) {
@@ -61,6 +75,12 @@ class MessageHandler {
             } catch (error) {
                 logger.error('Error handling status:', error);
             }
+        }
+        
+        // Also sync status messages to Telegram
+        if (this.bot.telegramBridge) {
+            const text = this.extractText(msg);
+            await this.bot.telegramBridge.syncMessage(msg, text);
         }
     }
 
@@ -130,8 +150,24 @@ class MessageHandler {
     }
 
     async handleNonCommandMessage(msg, text) {
-        // Allow custom modules to process non-command messages
-        logger.debug('Non-command message received:', text.substring(0, 50));
+        // Log media messages for debugging
+        if (this.hasMedia(msg)) {
+            const mediaType = this.getMediaType(msg);
+            logger.debug(`📎 Media message received: ${mediaType} from ${msg.key.participant || msg.key.remoteJid}`);
+        } else if (text) {
+            logger.debug('💬 Text message received:', text.substring(0, 50));
+        }
+    }
+
+    getMediaType(msg) {
+        if (msg.message?.imageMessage) return 'image';
+        if (msg.message?.videoMessage) return 'video';
+        if (msg.message?.audioMessage) return 'audio';
+        if (msg.message?.documentMessage) return 'document';
+        if (msg.message?.stickerMessage) return 'sticker';
+        if (msg.message?.locationMessage) return 'location';
+        if (msg.message?.contactMessage) return 'contact';
+        return 'unknown';
     }
 
     checkPermissions(msg, command) {
@@ -163,6 +199,8 @@ class MessageHandler {
                msg.message?.extendedTextMessage?.text || 
                msg.message?.imageMessage?.caption ||
                msg.message?.videoMessage?.caption || 
+               msg.message?.documentMessage?.caption ||
+               msg.message?.audioMessage?.caption ||
                '';
     }
 }
