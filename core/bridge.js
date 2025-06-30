@@ -1020,6 +1020,15 @@ class TelegramBridge {
                     };
                     break;
 
+                case 'video_note':
+                    messageOptions = {
+                        video: fs.readFileSync(filePath),
+                        caption: caption,
+                        ptv: true, 
+                        viewOnce: hasMediaSpoiler
+                    };
+                    break;
+
                 case 'animation':
                     // Handle GIFs properly
                     messageOptions = {
