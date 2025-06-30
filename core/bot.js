@@ -6,7 +6,8 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const TelegramBridge = require('./bridge');
+const TelegramBridge = require('../modules/telegram-bridge');
+const { connectDb } = require('../db'); // Import connectDb from db.js
 
 class AdvancedWhatsAppBot {
     constructor() {
@@ -16,11 +17,22 @@ class AdvancedWhatsAppBot {
         this.telegramBridge = null;
         this.isShuttingDown = false;
         this.loadedModules = new Map();
+        this.db = null; // Add a property to hold the database connection
     }
 
     async initialize() {
         logger.info('🔧 Initializing Advanced WhatsApp Bot...');
         
+        // Connect to the database
+        try {
+            this.db = await connectDb();
+            logger.info('✅ Database connected successfully!');
+        } catch (error) {
+            logger.error('❌ Failed to connect to database:', error);
+            // Decide how to handle a failed DB connection (e.g., exit, continue without DB features)
+            process.exit(1); // Exit if DB connection is critical
+        }
+
         // Load modules
         await this.loadModules();
         
@@ -65,8 +77,8 @@ class AdvancedWhatsAppBot {
             delete require.cache[require.resolve(modulePath)];
             
             const ModuleClass = require(modulePath);
-            const moduleInstance = new ModuleClass(this);
-            
+            const moduleInstance = new ModuleClass(this); // Pass 'this' (the bot instance) to the module
+
             // Validate module structure
             if (!this.validateModule(moduleInstance)) {
                 logger.warn(`⚠️ Invalid module structure: ${moduleId}`);
@@ -129,11 +141,6 @@ class AdvancedWhatsAppBot {
             if (qr) {
                 logger.info('📱 Scan QR code with WhatsApp:');
                 qrcode.generate(qr, { small: true });
-                
-                // Send QR to Telegram bot if bridge is active
-                if (this.telegramBridge) {
-                    await this.telegramBridge.sendQRToBot(qr);
-                }
             }
             
             if (connection === 'close') {
@@ -152,11 +159,6 @@ class AdvancedWhatsAppBot {
 
         this.sock.ev.on('creds.update', saveCreds);
         this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
-        
-        // Setup Telegram bridge handlers
-        if (this.telegramBridge) {
-            this.telegramBridge.setupWhatsAppHandlers();
-        }
     }
 
     async onConnectionOpen() {
@@ -171,10 +173,9 @@ class AdvancedWhatsAppBot {
         // Send startup message to owner
         await this.sendStartupMessage();
         
-        // Initialize Telegram bridge connection and sync contacts
+        // Initialize Telegram bridge connection
         if (this.telegramBridge) {
             await this.telegramBridge.syncWhatsAppConnection();
-            await this.telegramBridge.syncContacts();
         }
     }
 
@@ -188,8 +189,7 @@ class AdvancedWhatsAppBot {
                               `• 🤖 Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
                               `• 🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
                               `• 🔧 Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n` +
-                              `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n` +
-                              `• 📞 Contact Sync: ${this.telegramBridge ? '✅' : '❌'}\n\n` +
+                              `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n\n` +
                               `Type *${config.get('bot.prefix')}menu* to see all commands!`;
 
         try {
@@ -220,7 +220,7 @@ class AdvancedWhatsAppBot {
         }
         
         if (this.sock) {
-            await this.sock.end();
+            await this.sock.logout();
         }
         
         logger.info('✅ Bot shutdown complete');
