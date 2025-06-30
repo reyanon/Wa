@@ -1,380 +1,245 @@
+const TelegramBot = require('node-telegram-bot-api');
 const config = require('../config');
-const logger = require('./logger');
-const { connectDb } = require('./db');
+const logger = require('./logger'); // Assuming logger is in the same directory as this file
+const fs = require('fs-extra'); // Required for clearauth command (even if clearauth is removed, fs-extra might be needed for other things, but let's keep it minimal)
 
 class TelegramCommands {
     constructor(bridge) {
-        this.bridge = bridge;
-        this.db = null;
-        this.initializeDb();
+        this.bridge = bridge; // The TelegramBridge instance
+        this.bot = bridge.telegramBot;
+        this.messageQueue = new Map(); // Stores messages for rate limiting
+        this.commandRateLimits = new Map(); // Stores rate limit info for commands
+        this.rateLimitDuration = config.get('features.rateLimiting.duration') || 5000; // Default 5 seconds
+        this.rateLimitMessageCount = config.get('features.rateLimiting.messageCount') || 3; // Default 3 messages
+        
+        this.registerGlobalCommandHandlers();
+        logger.info('⚙️ Telegram command handlers registered');
     }
 
-    async initializeDb() {
-        try {
-            this.db = await connectDb();
-            
-            // Create collections if they don't exist
-            await this.db.createCollection('bridge_mappings').catch(() => {});
-            await this.db.createCollection('user_mappings').catch(() => {});
-            await this.db.createCollection('contact_mappings').catch(() => {});
-            
-            logger.info('📊 Database initialized for Telegram commands');
-        } catch (error) {
-            logger.error('❌ Failed to initialize database for commands:', error);
+    registerGlobalCommandHandlers() {
+        this.bot.onText(/\/start/, this.wrapCommand(this.handleStart));
+        this.bot.onText(/\/ping/, this.wrapCommand(this.handlePing));
+        this.bot.onText(/\/status/, this.wrapCommand(this.handleStatus));
+        this.bot.onText(/\/help/, this.wrapCommand(this.handleHelp));
+        this.bot.onText(/\/restart/, this.wrapCommand(this.handleRestart));
+        this.bot.onText(/\/setowner/, this.wrapCommand(this.handleSetOwner));
+        this.bot.onText(/\/synccontacts/, this.wrapCommand(this.handleSyncContacts));
+        this.bot.onText(/\/settargetchat (.+)/, this.wrapCommand(this.handleSetTargetChat)); 
+        this.bot.onText(/\/send (.+) (.+)/, this.wrapCommand(this.handleSend)); // Matches /send <number> <message>
+    }
+
+    wrapCommand(handler) {
+        return async (msg, match) => {
+            const chatId = msg.chat.id;
+            const command = match[0].split(' ')[0]; 
+
+            // Rate limiting check
+            if (config.get('features.rateLimiting')) {
+                const now = Date.now();
+                const userCommandKey = `${chatId}_${command}`;
+                
+                if (!this.commandRateLimits.has(userCommandKey)) {
+                    this.commandRateLimits.set(userCommandKey, { count: 0, firstTimestamp: now });
+                }
+
+                const commandData = this.commandRateLimits.get(userCommandKey);
+
+                // Clear old counts
+                if (now - commandData.firstTimestamp > this.rateLimitDuration) {
+                    commandData.count = 0;
+                    commandData.firstTimestamp = now;
+                }
+
+                commandData.count++;
+
+                if (commandData.count > this.rateLimitMessageCount) {
+                    logger.warn(`⚠️ Rate limit exceeded for user ${chatId} on command ${command}`);
+                    await this.bot.sendMessage(chatId, `⏳ Please wait a moment before sending too many commands.`);
+                    return; 
+                }
+            }
+
+            if (msg.chat.type === 'private') {
+                this.bridge.botChatId = chatId;
+            }
+
+            try {
+                await handler.call(this, msg, match);
+            } catch (error) {
+                logger.error(`❌ Error handling command ${command} for user ${chatId}:`, error);
+                await this.bot.sendMessage(chatId, `❌ An error occurred while processing your command.`);
+            }
+        };
+    }
+
+    isOwner(chatId) {
+        const ownerId = config.get('bot.owner');
+        return ownerId && ownerId === chatId.toString();
+    }
+
+    async handleStart(msg) {
+        const chatId = msg.chat.id;
+        const welcomeMessage = `👋 Hello! I am *${config.get('bot.name')} v${config.get('bot.version')}*.\n\n` +
+                               `I bridge messages between WhatsApp and Telegram.\n\n` +
+                               `Type /help to see available commands.`;
+        await this.bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
+    }
+
+    async handlePing(msg) {
+        const chatId = msg.chat.id;
+        await this.bot.sendMessage(chatId, 'Pong!');
+    }
+
+    async handleStatus(msg) {
+        const chatId = msg.chat.id;
+        const waStatus = this.bridge.whatsappBot.sock?.user ? '✅ Connected' : '❌ Disconnected';
+        const tgStatus = this.bridge.telegramBot ? '✅ Active' : '❌ Inactive';
+        const bridgeStatus = this.bridge.bridgeActive ? '✅ Active' : '❌ Stopped'; 
+        const ownerId = config.get('bot.owner') || 'Not set';
+        const targetChatId = config.get('telegram.chatId') || 'Not set'; 
+        
+        const uptimeInSeconds = process.uptime();
+        const hours = Math.floor(uptimeInSeconds / 3600);
+        const minutes = Math.floor((uptimeInSeconds % 3600) / 60);
+        const seconds = Math.floor(uptimeInSeconds % 60);
+
+        let statusMessage = `*🤖 Bot Status:*\n\n` +
+                            `• WhatsApp Connection: ${waStatus}\n` +
+                            `• Telegram Bot: ${tgStatus}\n` +
+                            `• Telegram Bridge: ${bridgeStatus}\n` + 
+                            `• Owner ID: \`${ownerId}\`\n` +
+                            `• Target Telegram Chat ID: \`${targetChatId}\`\n` + 
+                            `• Synced WhatsApp Contacts: ${this.bridge.contactMappings.size}\n` +
+                            `• Active WhatsApp Topics: ${this.bridge.chatMappings.size}\n` +
+                            `• Uptime: ${hours}h ${minutes}m ${seconds}s\n\n` +
+                            `_Version: ${config.get('bot.version')}_`;
+
+        await this.bot.sendMessage(chatId, statusMessage, { parse_mode: 'Markdown' });
+    }
+
+    async handleHelp(msg) {
+        const chatId = msg.chat.id;
+        let helpMessage = `📚 *Available Commands:*\n\n`;
+
+        const commands = [
+            { cmd: '/start', desc: 'Get a welcome message' },
+            { cmd: '/ping', desc: 'Check bot responsiveness' },
+            { cmd: '/status', desc: 'Show bot connection status and uptime' },
+            { cmd: '/help', desc: 'Show this command menu' },
+            { cmd: '/send <number> <message>', desc: 'Send a message to a WhatsApp number' }
+        ];
+
+        if (this.isOwner(chatId)) {
+            helpMessage += `\n👑 *Owner Commands:*\n`;
+            commands.push(
+                { cmd: '/restart', desc: 'Restart the bot (owner only)' },
+                { cmd: '/setowner', desc: 'Set current user as owner (owner only)' },
+                { cmd: '/synccontacts', desc: 'Sync WhatsApp contacts (owner only)' },
+                { cmd: '/settargetchat <ID>', desc: 'Set the main Telegram chat ID for bridging (owner only)' } 
+            );
         }
+
+        commands.forEach(command => {
+            helpMessage += `• ${command.cmd} - ${command.desc}\n`;
+        });
+
+        await this.bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
     }
 
-    async saveMappings() {
-        if (!this.db) return;
-        
-        try {
-            // Save chat mappings
-            const chatMappings = Array.from(this.bridge.chatMappings.entries()).map(([jid, topicId]) => ({
-                jid,
-                topicId,
-                updatedAt: new Date()
-            }));
-            
-            if (chatMappings.length > 0) {
-                await this.db.collection('bridge_mappings').deleteMany({});
-                await this.db.collection('bridge_mappings').insertMany(chatMappings);
-            }
-
-            // Save user mappings
-            const userMappings = Array.from(this.bridge.userMappings.entries()).map(([participant, data]) => ({
-                participant,
-                ...data,
-                updatedAt: new Date()
-            }));
-            
-            if (userMappings.length > 0) {
-                await this.db.collection('user_mappings').deleteMany({});
-                await this.db.collection('user_mappings').insertMany(userMappings);
-            }
-
-            // Save contact mappings
-            const contactMappings = Array.from(this.bridge.contactMappings.entries()).map(([phone, name]) => ({
-                phone,
-                name,
-                updatedAt: new Date()
-            }));
-            
-            if (contactMappings.length > 0) {
-                await this.db.collection('contact_mappings').deleteMany({});
-                await this.db.collection('contact_mappings').insertMany(contactMappings);
-            }
-
-            logger.debug('💾 Bridge mappings saved to database');
-        } catch (error) {
-            logger.error('❌ Failed to save mappings to database:', error);
-        }
-    }
-
-    async loadMappings() {
-        if (!this.db) return;
-        
-        try {
-            // Load chat mappings
-            const chatMappings = await this.db.collection('bridge_mappings').find({}).toArray();
-            for (const mapping of chatMappings) {
-                this.bridge.chatMappings.set(mapping.jid, mapping.topicId);
-            }
-
-            // Load user mappings
-            const userMappings = await this.db.collection('user_mappings').find({}).toArray();
-            for (const mapping of userMappings) {
-                const { participant, ...data } = mapping;
-                delete data._id;
-                delete data.updatedAt;
-                this.bridge.userMappings.set(participant, data);
-            }
-
-            // Load contact mappings
-            const contactMappings = await this.db.collection('contact_mappings').find({}).toArray();
-            for (const mapping of contactMappings) {
-                this.bridge.contactMappings.set(mapping.phone, mapping.name);
-            }
-
-            logger.info(`📊 Loaded mappings from database: ${chatMappings.length} chats, ${userMappings.length} users, ${contactMappings.length} contacts`);
-        } catch (error) {
-            logger.error('❌ Failed to load mappings from database:', error);
-        }
-    }
-
-    async handleCommand(msg) {
-        const text = msg.text;
-        if (!text || !text.startsWith('/')) return;
-
-        const [command, ...args] = text.split(' ');
-        
-        try {
-            switch (command.toLowerCase()) {
-                case '/start':
-                    await this.handleStart(msg.chat.id);
-                    break;
-                    
-                case '/status':
-                    await this.handleStatus(msg.chat.id);
-                    break;
-                    
-                case '/restart':
-                    await this.handleRestart(msg.chat.id);
-                    break;
-                    
-                case '/send':
-                    await this.handleSend(msg.chat.id, args);
-                    break;
-                    
-                case '/contacts':
-                    await this.handleContacts(msg.chat.id);
-                    break;
-                    
-                case '/sync':
-                    await this.handleSync(msg.chat.id);
-                    break;
-
-                case '/bridge':
-                    await this.handleBridge(msg.chat.id, args);
-                    break;
-
-                case '/db':
-                    await this.handleDatabase(msg.chat.id, args);
-                    break;
-                    
-                default:
-                    await this.handleHelp(msg.chat.id);
-            }
-        } catch (error) {
-            logger.error(`❌ Error handling command ${command}:`, error);
-            await this.bridge.telegramBot.sendMessage(msg.chat.id, 
-                `❌ Error executing command: ${error.message}`);
-        }
-    }
-
-    async handleStart(chatId) {
-        const welcomeText = `🤖 *WhatsApp-Telegram Bridge Bot*\n\n` +
-                               `✅ Bridge Status: ${this.bridge.whatsappBot.sock ? 'Connected' : 'Disconnected'}\n` +
-                               `📱 WhatsApp: ${this.bridge.whatsappBot.sock?.user?.name || 'Not connected'}\n` +
-                               `🔗 Contacts: ${this.bridge.contactMappings.size} synced\n` +
-                               `💾 Database: ${this.db ? 'Connected' : 'Disconnected'}\n\n` +
-                               `*Available Commands:*\n` +
-                               `/status - Check bridge status\n` +
-                               `/restart - Restart bridge\n` +
-                               `/send <number> <message> - Send message\n` +
-                               `/contacts - List contacts\n` +
-                               `/sync - Sync contacts\n` +
-                               `/bridge <start|stop|status> - Control bridge\n` +
-                               `/db <save|load|clear> - Database operations`;
-        
-        await this.bridge.telegramBot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown' });
-    }
-
-    async handleStatus(chatId) {
-        const uptime = process.uptime();
-        const hours = Math.floor(uptime / 3600);
-        const minutes = Math.floor((uptime % 3600) / 60);
-        const seconds = Math.floor(uptime % 60);
-        
-        const status = `📊 *Bridge Status*\n\n` +
-                             `🔗 WhatsApp: ${this.bridge.whatsappBot.sock ? '✅ Connected' : '❌ Disconnected'}\n` +
-                             `📱 User: ${this.bridge.whatsappBot.sock?.user?.name || 'N/A'}\n` +
-                             `📞 Contacts: ${this.bridge.contactMappings.size}\n` +
-                             `💬 Active Chats: ${this.bridge.chatMappings.size}\n` +
-                             `👥 Users: ${this.bridge.userMappings.size}\n` +
-                             `💾 Database: ${this.db ? '✅ Connected' : '❌ Disconnected'}\n` +
-                             `🔄 Processing: ${this.bridge.isProcessing ? 'Yes' : 'No'}\n` +
-                             `⏰ Uptime: ${hours}h ${minutes}m ${seconds}s\n` +
-                             `💾 Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`;
-        
-        await this.bridge.telegramBot.sendMessage(chatId, status, { parse_mode: 'Markdown' });
-    }
-
-    async handleRestart(chatId) {
-        await this.bridge.telegramBot.sendMessage(chatId, '🔄 Restarting bridge...');
-        
-        try {
-            // Save current mappings before restart
-            await this.saveMappings();
-            
-            // Clear mappings (this might be redundant if loading overwrites, but good for explicit reset)
-            this.bridge.chatMappings.clear();
-            this.bridge.userMappings.clear();
-            this.bridge.contactMappings.clear(); // Clear contact mappings as well
-
-            // Reload from database
-            await this.loadMappings();
-            
-            // Resync contacts
-            await this.bridge.syncContacts();
-            
-            await this.bridge.telegramBot.sendMessage(chatId, '✅ Bridge restarted successfully!');
-        } catch (error) {
-            await this.bridge.telegramBot.sendMessage(chatId, `❌ Restart failed: ${error.message}`);
-        }
-    }
-
-    async handleSend(chatId, args) {
-        if (args.length < 2) {
-            await this.bridge.telegramBot.sendMessage(chatId, 
-                '❌ Usage: /send <number> <message>\n\nExample: /send 1234567890 Hello there!');
+    async handleRestart(msg) {
+        const chatId = msg.chat.id;
+        if (!this.isOwner(chatId)) {
+            await this.bot.sendMessage(chatId, '🚫 You are not authorized to use this command.');
             return;
         }
+        await this.bot.sendMessage(chatId, '🔄 Restarting bot...');
+        logger.info('🔄 Restart command received. Exiting for restart.');
+        process.exit(0); 
+    }
+
+    async handleSetOwner(msg) {
+        const chatId = msg.chat.id;
+        if (config.get('bot.owner') && config.get('bot.owner') !== chatId.toString()) {
+            await this.bot.sendMessage(chatId, '🚫 Bot owner is already set and you are not the current owner.');
+            return;
+        }
+        config.set('bot.owner', chatId.toString());
+        await config.save(); 
+        await this.bot.sendMessage(chatId, `👑 You (${chatId}) have been set as the bot owner.`);
+        logger.info(`👑 Bot owner set to: ${chatId}`);
+    }
+
+    async handleSetTargetChat(msg, match) {
+        const chatId = msg.chat.id;
+        const newTargetId = match[1].trim();
+
+        if (!this.isOwner(chatId)) {
+            await this.bot.sendMessage(chatId, '🚫 You are not authorized to use this command.');
+            return;
+        }
+
+        if (!newTargetId || isNaN(parseInt(newTargetId))) { 
+            await this.bot.sendMessage(chatId, '❓ Usage: /settargetchat <TelegramChatID>\nExample: /settargetchat -1001234567890');
+            return;
+        }
+
+        const oldTargetId = config.get('telegram.chatId');
         
-        const number = args[0];
-        const message = args.slice(1).join(' ');
+        try {
+            config.set('telegram.chatId', newTargetId);
+            await config.save(); 
+
+            await this.bot.sendMessage(chatId, 
+                `✅ Telegram target chat ID updated from \`${oldTargetId}\` to \`${newTargetId}\`.\n\n` +
+                `*Please restart the bot for this change to take full effect in message bridging.*`
+            );
+            logger.info(`✅ Telegram target chat ID updated by owner: ${oldTargetId} -> ${newTargetId}`);
+        } catch (error) {
+            logger.error('❌ Failed to set target chat ID:', error);
+            await this.bot.sendMessage(chatId, `❌ Failed to set target chat ID: ${error.message}`);
+        }
+    }
+
+    async handleSyncContacts(msg) {
+        const chatId = msg.chat.id;
+        if (!this.isOwner(chatId)) {
+            await this.bot.sendMessage(chatId, '🚫 You are not authorized to use this command.');
+            return;
+        }
+        await this.bot.sendMessage(chatId, '🔄 Syncing WhatsApp contacts...');
+        try {
+            await this.bridge.syncContacts();
+            await this.bot.sendMessage(chatId, '✅ WhatsApp contacts synced.');
+            logger.info('✅ WhatsApp contacts synced by owner.');
+        } catch (error) {
+            logger.error('❌ Failed to sync contacts:', error);
+            await this.bot.sendMessage(chatId, `❌ Failed to sync contacts: ${error.message}`);
+        }
+    }
+
+    async handleSend(msg, match) {
+        const chatId = msg.chat.id;
+        const number = match[1];
+        const message = match[2];
         
+        if (!this.isOwner(chatId)) {
+            await this.bot.sendMessage(chatId, '🚫 You are not authorized to use this command.');
+            return;
+        }
+
         try {
             const jid = number.includes('@') ? number : `${number}@s.whatsapp.net`;
-            const result = await this.bridge.whatsappBot.sendMessage(jid, { text: message });
+            const sendResult = await this.bridge.whatsappBot.sendMessage(jid, { text: message });
             
-            if (result?.key?.id) {
-                await this.bridge.telegramBot.sendMessage(chatId, `✅ Message sent to ${number}`);
+            if (sendResult?.key?.id) {
+                await this.bot.sendMessage(chatId, `✅ Message sent to \`${number}\``);
             } else {
-                await this.bridge.telegramBot.sendMessage(chatId, `⚠️ Message may not have been delivered to ${number}`);
+                await this.bot.sendMessage(chatId, `⚠️ Message may not have been delivered to \`${number}\``);
             }
         } catch (error) {
-            await this.bridge.telegramBot.sendMessage(chatId, `❌ Failed to send message: ${error.message}`);
+            logger.error(`❌ Failed to send message to ${number}:`, error);
+            await this.bot.sendMessage(chatId, `❌ Failed to send message: ${error.message}`);
         }
-    }
-
-    async handleContacts(chatId) {
-        if (this.bridge.contactMappings.size === 0) {
-            await this.bridge.telegramBot.sendMessage(chatId, '📞 No contacts found. Use /sync to sync contacts.');
-            return;
-        }
-        
-        let contactsList = '📞 *Contacts List:*\n\n';
-        let count = 0;
-        
-        for (const [phone, name] of this.bridge.contactMappings.entries()) {
-            contactsList += `${name} - +${phone}\n`;
-            count++;
-            
-            if (count >= 50) { // Limit to prevent message too long
-                contactsList += '\n... and more';
-                break;
-            }
-        }
-        
-        contactsList += `\n📊 Total: ${this.bridge.contactMappings.size} contacts`;
-        
-        await this.bridge.telegramBot.sendMessage(chatId, contactsList, { parse_mode: 'Markdown' });
-    }
-
-    async handleSync(chatId) {
-        await this.bridge.telegramBot.sendMessage(chatId, '🔄 Syncing contacts...');
-        
-        try {
-            await this.bridge.syncContacts();
-            await this.saveMappings(); // Save after sync
-            await this.bridge.telegramBot.sendMessage(chatId, 
-                `✅ Contacts synced successfully!\n📞 Total: ${this.bridge.contactMappings.size} contacts`);
-        } catch (error) {
-            await this.bridge.telegramBot.sendMessage(chatId, `❌ Sync failed: ${error.message}`);
-        }
-    }
-
-    async handleBridge(chatId, args) {
-        if (args.length === 0) {
-            await this.bridge.telegramBot.sendMessage(chatId, 
-                '❓ Usage: /bridge <action>\n\nActions:\n• start - Start bridge\n• stop - Stop bridge\n• status - Show bridge status');
-            return;
-        }
-
-        const action = args[0].toLowerCase();
-        
-        switch (action) {
-            case 'start':
-                try {
-                    if (this.bridge.telegramBot && this.bridge.telegramBot.isPolling()) { // Check if bot is actively polling
-                        await this.bridge.telegramBot.sendMessage(chatId, '⚠️ Bridge is already running.');
-                        return;
-                    }
-                    
-                    await this.bridge.initialize(); // Assuming initialize sets up telegramBot
-                    await this.loadMappings(); // Load mappings after start
-                    await this.bridge.telegramBot.sendMessage(chatId, '✅ Bridge started successfully.');
-                } catch (error) {
-                    await this.bridge.telegramBot.sendMessage(chatId, `❌ Failed to start bridge: ${error.message}`);
-                }
-                break;
-                
-            case 'stop':
-                try {
-                    await this.saveMappings(); // Save before stop
-                    await this.bridge.shutdown();
-                    // Note: Cannot send message after shutdown as bot is stopped.
-                    // You might consider a delayed message or a log for confirmation.
-                } catch (error) {
-                    logger.error('Failed to stop bridge:', error);
-                }
-                break;
-                
-            case 'status':
-                await this.handleStatus(chatId);
-                break;
-                
-            default:
-                await this.bridge.telegramBot.sendMessage(chatId, 
-                    `❌ Unknown action: ${action}\nUse: start, stop, or status`);
-        }
-    }
-
-    async handleDatabase(chatId, args) {
-        if (!this.db) {
-            await this.bridge.telegramBot.sendMessage(chatId, '❌ Database not connected.');
-            return;
-        }
-
-        if (args.length === 0) {
-            await this.bridge.telegramBot.sendMessage(chatId, 
-                '❓ Usage: /db <action>\n\nActions:\n• save - Save current mappings to DB\n• load - Load mappings from DB\n• clear - Clear all mappings in DB');
-            return;
-        }
-
-        const action = args[0].toLowerCase();
-
-        try {
-            switch (action) {
-                case 'save':
-                    await this.saveMappings();
-                    await this.bridge.telegramBot.sendMessage(chatId, '💾 Mappings saved to database.');
-                    break;
-                case 'load':
-                    await this.loadMappings();
-                    await this.bridge.telegramBot.sendMessage(chatId, '📊 Mappings loaded from database.');
-                    break;
-                case 'clear':
-                    await this.db.collection('bridge_mappings').deleteMany({});
-                    await this.db.collection('user_mappings').deleteMany({});
-                    await this.db.collection('contact_mappings').deleteMany({});
-                    this.bridge.chatMappings.clear();
-                    this.bridge.userMappings.clear();
-                    this.bridge.contactMappings.clear();
-                    await this.bridge.telegramBot.sendMessage(chatId, '🗑️ All database mappings cleared.');
-                    break;
-                default:
-                    await this.bridge.telegramBot.sendMessage(chatId, `❌ Unknown database action: ${action}\nUse: save, load, or clear.`);
-            }
-        } catch (error) {
-            logger.error(`❌ Error handling database command ${action}:`, error);
-            await this.bridge.telegramBot.sendMessage(chatId, `❌ Failed to execute database command: ${error.message}`);
-        }
-    }
-
-    // You might also want a help command to list all available commands
-    async handleHelp(chatId) {
-        const helpText = `📚 *Available Commands:*\n\n` +
-                         `/start - Get a welcome message and summary.\n` +
-                         `/status - Check the current bridge status.\n` +
-                         `/restart - Restart the bridge (saves and reloads mappings).\n` +
-                         `/send <number> <message> - Send a WhatsApp message to a specific number.\n` +
-                         `/contacts - List synced WhatsApp contacts.\n` +
-                         `/sync - Manually sync WhatsApp contacts to the database.\n` +
-                         `/bridge <start|stop|status> - Control the bridge's operation.\n` +
-                         `/db <save|load|clear> - Perform database operations on mappings.\n\n` +
-                         `_Note: Commands starting with '/' are for bot control._`;
-        await this.bridge.telegramBot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
     }
 }
 
