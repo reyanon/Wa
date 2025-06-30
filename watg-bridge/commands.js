@@ -1,4 +1,4 @@
-const logger = require('./logger');
+const logger = require('../core/logger');
 
 class TelegramCommands {
     constructor(bridge) {
