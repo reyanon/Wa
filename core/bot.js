@@ -6,8 +6,8 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const TelegramBridge = require('../modules/telegram-bridge');
-const { connectDb } = require('../db'); // Import connectDb from db.js
+const TelegramBridge = require('./bridge');
+const { connectDb } = require('./db'); // Import connectDb from db.js
 
 class AdvancedWhatsAppBot {
     constructor() {
