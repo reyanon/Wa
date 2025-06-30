@@ -45,6 +45,7 @@ class TelegramBridge {
             await this.setupTelegramHandlers();
             await this.syncContacts(); // Initial contact sync
             logger.info('✅ Telegram bridge initialized');
+            this.setupTypingDetection(); 
         } catch (error) {
             logger.error('❌ Failed to initialize Telegram bridge:', error);
         }
@@ -599,10 +600,6 @@ class TelegramBridge {
                     mediaMessage = whatsappMsg.message.videoMessage;
                     fileName += '.mp4';
                     break;
-                case 'video':
-                    mediaMessage = whatsappMsg.message.videoMessage;
-                    fileName += '.mp4';
-                    break;
                 case 'audio':
                     mediaMessage = whatsappMsg.message.audioMessage;
                     fileName += '.ogg';
@@ -779,61 +776,69 @@ class TelegramBridge {
                 caption = `👤 ${senderName} shared contact: ${displayName}`;
             }
 
-          const phoneNumber = contactMessage.vcard.match(/TEL.*:(.*)/)?.[1] || '';
-          await this.telegramBot.sendContact(config.get('telegram.chatId'), phoneNumber, displayName, {
-         message_thread_id: topicId
-         });
-
+            await this.telegramBot.sendDocument(config.get('telegram.chatId'), Buffer.from(vcard), {
+                message_thread_id: topicId,
+                caption: caption,
+                filename: `${displayName}.vcf`
+            });
         } catch (error) {
             logger.error('❌ Failed to handle WhatsApp contact message:', error);
         }
     }
 
     // Send presence when user is typing/active in Telegram
-
-async sendPresence(jid, isTyping = false) {
-    try {
-        if (!this.whatsappBot.sock) return;
+    setupTypingDetection() {
+        if (!this.telegramBot) return;
         
-        if (isTyping) {
-            await this.whatsappBot.sock.sendPresenceUpdate('composing', jid);
+        // Listen for chat action updates (typing)
+        this.telegramBot.on('chat_action', async (action) => {
+            if (action.chat.type === 'supergroup' && action.message_thread_id) {
+                const whatsappJid = this.findWhatsAppJidByTopic(action.message_thread_id);
+                if (whatsappJid && action.action === 'typing') {
+                    await this.sendPresence(whatsappJid, true);
+                }
+            }
+        });
+    }
+
+    async sendPresence(jid, isTyping = false) {
+        try {
+            if (!this.whatsappBot.sock) return;
+            
+            const presence = isTyping ? 'composing' : 'available';
+            await this.whatsappBot.sock.sendPresenceUpdate(presence, jid);
             
             // Clear previous timeout
             if (this.presenceTimeout) {
                 clearTimeout(this.presenceTimeout);
             }
             
-            // Set presence back to paused after 3 seconds (like watgbridge)
+            // Set presence back to unavailable after 10 seconds
             this.presenceTimeout = setTimeout(async () => {
                 try {
-                    await this.whatsappBot.sock.sendPresenceUpdate('paused', jid);
+                    await this.whatsappBot.sock.sendPresenceUpdate('unavailable', jid);
                 } catch (error) {
-                    logger.debug('Failed to send paused presence:', error);
+                    logger.debug('Failed to send unavailable presence:', error);
                 }
-            }, 3000);
-        } else {
-            await this.whatsappBot.sock.sendPresenceUpdate('available', jid);
+            }, 10000);
+            
+        } catch (error) {
+            logger.debug('Failed to send presence:', error);
         }
-        
-    } catch (error) {
-        logger.debug('Failed to send presence:', error);
     }
-}
 
     // Mark messages as read in WhatsApp
-
-async markAsRead(jid, messageKeys) {
-    try {
-        if (!this.whatsappBot.sock || !messageKeys.length) return;
-        
-        // Use the correct WhatsApp method for marking as read
-        await this.whatsappBot.sock.sendReceipt(jid, undefined, messageKeys, 'read');
-        logger.debug(`📖 Marked ${messageKeys.length} messages as read in ${jid}`);
-    } catch (error) {
-        logger.debug('Failed to mark messages as read:', error);
+    async markAsRead(jid, messageKeys) {
+        try {
+            if (!this.whatsappBot.sock || !messageKeys.length) return;
+            
+            // Use the correct method for marking messages as read
+            await this.whatsappBot.sock.sendReceipt(jid, undefined, messageKeys, 'read');
+            logger.debug(`📖 Marked ${messageKeys.length} messages as read in ${jid}`);
+        } catch (error) {
+            logger.debug('Failed to mark messages as read:', error);
+        }
     }
-}
-
 
     async handleTelegramMessage(msg) {
         try {
@@ -1015,15 +1020,6 @@ async markAsRead(jid, messageKeys) {
                     };
                     break;
 
-                case 'video_note':
-                    messageOptions = {
-                        video: fs.readFileSync(filePath),
-                        caption: caption,
-                        ptv: true, 
-                        viewOnce: hasMediaSpoiler
-                    };
-                    break;
-
                 case 'animation':
                     // Handle GIFs properly
                     messageOptions = {
@@ -1060,37 +1056,34 @@ async markAsRead(jid, messageKeys) {
                     };
                     break;
                     
-case 'sticker':
-    try {
-        const stickerBuffer = fs.readFileSync(filePath);
-
-        // Convert to WhatsApp-compatible format (512x512 WebP)
-        const convertedPath = filePath.replace('.webp', '-wa.webp');
-        await sharp(stickerBuffer)
-            .resize(512, 512, {
-                fit: 'contain',
-                background: { r: 0, g: 0, b: 0, alpha: 0 }
-            })
-            .webp({ lossless: true })
-            .toFile(convertedPath);
-
-        messageOptions = {
-            sticker: fs.readFileSync(convertedPath)
-        };
-
-        // Clean up after
-        setTimeout(() => fs.unlink(convertedPath).catch(() => {}), 5000);
-
-    } catch (conversionError) {
-        logger.warn('🧊 Sticker conversion failed, sending as image fallback');
-
-        messageOptions = {
-            image: fs.readFileSync(filePath),
-            caption: 'Sticker'
-        };
-    }
-    break;
-
+                case 'sticker':
+                    // Convert Telegram sticker to WhatsApp compatible format
+                    try {
+                        // First try to convert to PNG for better compatibility
+                        const pngPath = filePath.replace('.webp', '.png');
+                        await sharp(filePath)
+                            .resize(512, 512, { 
+                                fit: 'contain',
+                                background: { r: 0, g: 0, b: 0, alpha: 0 }
+                            })
+                            .png()
+                            .toFile(pngPath);
+                        
+                        messageOptions = {
+                            sticker: fs.readFileSync(pngPath)
+                        };
+                        
+                        // Clean up PNG file after sending
+                        setTimeout(() => fs.unlink(pngPath).catch(() => {}), 5000);
+                        
+                    } catch (conversionError) {
+                        logger.debug('Failed to convert sticker, sending as image:', conversionError);
+                        messageOptions = {
+                            image: fs.readFileSync(filePath),
+                            caption: 'Sticker'
+                        };
+                    }
+                    break;
             }
 
             sendResult = await this.whatsappBot.sendMessage(whatsappJid, messageOptions);
