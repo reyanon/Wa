@@ -6,7 +6,7 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const TelegramBridge = require('./bridge');
+const TelegramBridge = require('../watg-bridge/bridge');
 const { connectDb } = require('../utils/db');
 const ModuleLoader = require('./module-loader'); // <== Import ModuleLoader
 
