@@ -1,64 +1,17 @@
-const mongoose = require('mongoose');
 const config = require('../config');
-const logger = require('../core/logger');
+const { MongoClient } = require('mongodb');
 
-/**
- * Simple Database Manager for NexusWA
- */
-class DatabaseManager {
-    constructor() {
-        this.connection = null;
-        this.isConnected = false;
-    }
+const MONGO_URI = config.get('mongo.uri');
+const DB_NAME = config.get('mongo.dbName');
+const OPTIONS = config.get('mongo.options');
 
-    /**
-     * Connect to MongoDB database
-     */
-    async connect() {
-        try {
-            const uri = config.get('mongo.uri');
-            const dbName = config.get('mongo.dbName');
-            
-            logger.info('🔌 Connecting to MongoDB...');
-            
-            this.connection = await mongoose.connect(uri, {
-                useNewUrlParser: true,
-                useUnifiedTopology: true,
-                dbName: dbName
-            });
-            
-            this.isConnected = true;
-            logger.info('✅ Database connected successfully');
-            
-            return this.connection;
-        } catch (error) {
-            logger.error('❌ Database connection failed:', error);
-            throw error;
-        }
-    }
+const client = new MongoClient(MONGO_URI, OPTIONS);
 
-    /**
-     * Disconnect from database
-     */
-    async disconnect() {
-        try {
-            if (this.connection) {
-                await mongoose.disconnect();
-                this.isConnected = false;
-                logger.info('📴 Database disconnected');
-            }
-        } catch (error) {
-            logger.error('❌ Error disconnecting from database:', error);
-        }
+async function connectDb() {
+    if (!client.topology?.isConnected()) {
+        await client.connect();
     }
-
-    /**
-     * Check if database is connected
-     */
-    isConnectedToDatabase() {
-        return this.isConnected && mongoose.connection.readyState === 1;
-    }
+    return client.db(DB_NAME);
 }
 
-// Export singleton instance
-module.exports = new DatabaseManager();
+module.exports = { connectDb };
