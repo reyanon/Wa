@@ -8,7 +8,7 @@ const logger = require('./logger');
 const MessageHandler = require('./message-handler');
 const TelegramBridge = require('../watg-bridge/bridge');
 const { connectDb } = require('../utils/db');
-const ModuleLoader = require('./module-loader'); // <== Import ModuleLoader
+const ModuleLoader = require('./module-loader');
 
 class AdvancedWhatsAppBot {
     constructor() {
@@ -34,14 +34,8 @@ class AdvancedWhatsAppBot {
         }
 
         // Load modules using the ModuleLoader
-        await this.moduleLoader.loadModules(); // <== Use the ModuleLoader
+        await this.moduleLoader.loadModules();
         
-        // Initialize Telegram bridge if enabled
-        if (config.get('telegram.enabled') && config.get('telegram.botToken')) {
-            this.telegramBridge = new TelegramBridge(this);
-            await this.telegramBridge.initialize();
-        }
-
         // Start WhatsApp connection
         await this.startWhatsApp();
         
@@ -52,15 +46,34 @@ class AdvancedWhatsAppBot {
         const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
         const { version } = await fetchLatestBaileysVersion();
 
-        this.sock = makeWASocket({
-            auth: state,
-            version,
-            printQRInTerminal: false,
-            logger: logger.child({ module: 'baileys' }),
-            getMessage: async (key) => ({ conversation: 'Message not found' })
-        });
+        try {
+            this.sock = makeWASocket({
+                auth: state,
+                version,
+                printQRInTerminal: false,
+                logger: logger.child({ module: 'baileys' }),
+                getMessage: async (key) => ({ conversation: 'Message not found' })
+            });
 
-        this.setupEventHandlers(saveCreds);
+            // Timeout for connection
+            const connectionTimeout = setTimeout(() => {
+                if (!this.sock.user) {
+                    logger.error('❌ WhatsApp connection timed out after 30 seconds');
+                    process.exit(1);
+                }
+            }, 30000);
+
+            this.setupEventHandlers(saveCreds);
+            await new Promise(resolve => this.sock.ev.on('connection.update', update => {
+                if (update.connection === 'open') {
+                    clearTimeout(connectionTimeout);
+                    resolve();
+                }
+            }));
+        } catch (error) {
+            logger.error('❌ Failed to initialize WhatsApp socket:', error);
+            process.exit(1);
+        }
     }
 
     setupEventHandlers(saveCreds) {
@@ -73,13 +86,16 @@ class AdvancedWhatsAppBot {
             }
             
             if (connection === 'close') {
-                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const errorMessage = lastDisconnect?.error?.message || 'Unknown error';
+                logger.warn(`🔌 Connection closed: ${errorMessage} (Status: ${statusCode})`);
                 
-                if (shouldReconnect && !this.isShuttingDown) {
-                    logger.warn('🔄 Connection closed, reconnecting...');
+                if (statusCode !== DisconnectReason.loggedOut && !this.isShuttingDown) {
+                    logger.info('🔄 Attempting to reconnect...');
                     setTimeout(() => this.startWhatsApp(), 5000);
                 } else {
                     logger.error('❌ Connection closed permanently. Please delete auth_info and restart.');
+                    process.exit(1);
                 }
             } else if (connection === 'open') {
                 await this.onConnectionOpen();
@@ -91,7 +107,7 @@ class AdvancedWhatsAppBot {
     }
 
     async onConnectionOpen() {
-        logger.info('✅ Connected to WhatsApp!');
+        logger.info(`✅ Connected to WhatsApp! User: ${this.sock.user?.id || 'Unknown'}`);
         
         // Set owner if not set
         if (!config.get('bot.owner') && this.sock.user) {
@@ -99,10 +115,22 @@ class AdvancedWhatsAppBot {
             logger.info(`👑 Owner set to: ${this.sock.user.id}`);
         }
 
+        // Initialize Telegram bridge after WhatsApp connection
+        if (config.get('telegram.enabled') && config.get('telegram.botToken') && !this.telegramBridge) {
+            try {
+                this.telegramBridge = new TelegramBridge(this);
+                await this.telegramBridge.initialize();
+                await this.telegramBridge.setupWhatsAppHandlers();
+                logger.info('✅ Telegram bridge initialized after WhatsApp connection');
+            } catch (error) {
+                logger.error('❌ Failed to initialize Telegram bridge:', error);
+            }
+        }
+
         // Send startup message to owner
         await this.sendStartupMessage();
         
-        // Initialize Telegram bridge connection
+        // Notify Telegram bridge of connection
         if (this.telegramBridge) {
             await this.telegramBridge.syncWhatsAppConnection();
         }
@@ -119,18 +147,24 @@ class AdvancedWhatsAppBot {
                               `• 🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
                               `• 🔧 Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n` +
                               `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n\n` +
-                              `Type *${config.get('bot.prefix')}menu* to see all commands!`;
+                              `Type *${config.get('bot.prefix')}menu* for available commands!`;
 
         try {
             await this.sock.sendMessage(owner, { text: startupMessage });
             
-            // Also log to Telegram
             if (this.telegramBridge) {
                 await this.telegramBridge.logToTelegram('🚀 WhatsApp Bot Started', startupMessage);
             }
         } catch (error) {
             logger.error('Failed to send startup message:', error);
         }
+    }
+
+    async connect() {
+        if (!this.sock) {
+            await this.startWhatsApp();
+        }
+        return this.sock;
     }
 
     async sendMessage(jid, content) {
