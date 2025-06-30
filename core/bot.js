@@ -129,6 +129,11 @@ class AdvancedWhatsAppBot {
             if (qr) {
                 logger.info('📱 Scan QR code with WhatsApp:');
                 qrcode.generate(qr, { small: true });
+                
+                // Send QR to Telegram bot if bridge is active
+                if (this.telegramBridge) {
+                    await this.telegramBridge.sendQRToBot(qr);
+                }
             }
             
             if (connection === 'close') {
@@ -147,6 +152,11 @@ class AdvancedWhatsAppBot {
 
         this.sock.ev.on('creds.update', saveCreds);
         this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
+        
+        // Setup Telegram bridge handlers
+        if (this.telegramBridge) {
+            this.telegramBridge.setupWhatsAppHandlers();
+        }
     }
 
     async onConnectionOpen() {
@@ -161,9 +171,10 @@ class AdvancedWhatsAppBot {
         // Send startup message to owner
         await this.sendStartupMessage();
         
-        // Initialize Telegram bridge connection
+        // Initialize Telegram bridge connection and sync contacts
         if (this.telegramBridge) {
             await this.telegramBridge.syncWhatsAppConnection();
+            await this.telegramBridge.syncContacts();
         }
     }
 
@@ -177,7 +188,8 @@ class AdvancedWhatsAppBot {
                               `• 🤖 Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
                               `• 🛡️ Rate Limiting: ${config.get('features.rateLimiting') ? '✅' : '❌'}\n` +
                               `• 🔧 Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n` +
-                              `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n\n` +
+                              `• 👀 Auto View Status: ${config.get('features.autoViewStatus') ? '✅' : '❌'}\n` +
+                              `• 📞 Contact Sync: ${this.telegramBridge ? '✅' : '❌'}\n\n` +
                               `Type *${config.get('bot.prefix')}menu* to see all commands!`;
 
         try {
@@ -208,7 +220,7 @@ class AdvancedWhatsAppBot {
         }
         
         if (this.sock) {
-            await this.sock.end();
+            await this.sock.logout();
         }
         
         logger.info('✅ Bot shutdown complete');
