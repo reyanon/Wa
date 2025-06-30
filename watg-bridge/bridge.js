@@ -1294,7 +1294,6 @@ class TelegramBridge {
         }
 
         this.whatsappBot.sock.ev.on('call', async (calls) => {
-            logger.debug(`📞 Received ${calls.length} call events: ${JSON.stringify(calls)}`);
             for (const call of calls) {
                 await this.handleCallNotification(call);
             }
@@ -1320,26 +1319,24 @@ class TelegramBridge {
                                     await this.telegramBot.editForumTopic(config.get('telegram.chatId'), topicId, {
                                         name: contact.name
                                     });
-                                    logger.debug(`📝 Updated topic name for ${phone} to ${contact.name} (Topic ID: ${topicId})`);
+                                    logger.info(`📝 Updated topic name for ${phone} to ${contact.name}`);
                                 } catch (error) {
-                                    logger.error(`❌ Failed to update topic for ${phone}: ${error.message}`, { stack: error.stack });
+                                    logger.debug(`Could not update topic name for ${phone}:`, error);
                                 }
                             }
                         }
                     }
                 }
-                if (updatedCount > 0) {
-                    await this.logToTelegram('✅ Contact Update', `Updated ${updatedCount} contacts.`);
-                }
+                logger.info(`✅ Processed ${updatedCount} contact updates`);
+                await this.logToTelegram('✅ Contact Updates Processed', `Updated ${updatedCount} contacts.`);
             } catch (error) {
-                logger.error(`❌ Failed to handle contacts update: ${error.message}`, { stack: error.stack });
-                await this.logToTelegram('❌ Contact Update Failed', `Error: ${error.message}`);
+                logger.error('❌ Failed to process contact updates:', error);
+                await this.logToTelegram('❌ Contact Updates Failed', `Error: ${error.message}`);
             }
         });
 
         logger.info('📱 WhatsApp event handlers set up for Telegram bridge');
     }
-
 
     async shutdown() {
         logger.info('🛑 Shutting down Telegram bridge...');
