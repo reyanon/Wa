@@ -1,6 +1,6 @@
 const config = require('../config');
-const logger = require('../core/logger');
-const { connectDb } = require('../utils/db');
+const logger = require('./logger');
+const { connectDb } = require('./db');
 
 class TelegramCommands {
     constructor(bridge) {
@@ -153,18 +153,18 @@ class TelegramCommands {
 
     async handleStart(chatId) {
         const welcomeText = `🤖 *WhatsApp-Telegram Bridge Bot*\n\n` +
-                           `✅ Bridge Status: ${this.bridge.whatsappBot.sock ? 'Connected' : 'Disconnected'}\n` +
-                           `📱 WhatsApp: ${this.bridge.whatsappBot.sock?.user?.name || 'Not connected'}\n` +
-                           `🔗 Contacts: ${this.bridge.contactMappings.size} synced\n` +
-                           `💾 Database: ${this.db ? 'Connected' : 'Disconnected'}\n\n` +
-                           `*Available Commands:*\n` +
-                           `/status - Check bridge status\n` +
-                           `/restart - Restart bridge\n` +
-                           `/send <number> <message> - Send message\n` +
-                           `/contacts - List contacts\n` +
-                           `/sync - Sync contacts\n` +
-                           `/bridge <start|stop|status> - Control bridge\n` +
-                           `/db <save|load|clear> - Database operations`;
+                               `✅ Bridge Status: ${this.bridge.whatsappBot.sock ? 'Connected' : 'Disconnected'}\n` +
+                               `📱 WhatsApp: ${this.bridge.whatsappBot.sock?.user?.name || 'Not connected'}\n` +
+                               `🔗 Contacts: ${this.bridge.contactMappings.size} synced\n` +
+                               `💾 Database: ${this.db ? 'Connected' : 'Disconnected'}\n\n` +
+                               `*Available Commands:*\n` +
+                               `/status - Check bridge status\n` +
+                               `/restart - Restart bridge\n` +
+                               `/send <number> <message> - Send message\n` +
+                               `/contacts - List contacts\n` +
+                               `/sync - Sync contacts\n` +
+                               `/bridge <start|stop|status> - Control bridge\n` +
+                               `/db <save|load|clear> - Database operations`;
         
         await this.bridge.telegramBot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown' });
     }
@@ -176,15 +176,15 @@ class TelegramCommands {
         const seconds = Math.floor(uptime % 60);
         
         const status = `📊 *Bridge Status*\n\n` +
-                      `🔗 WhatsApp: ${this.bridge.whatsappBot.sock ? '✅ Connected' : '❌ Disconnected'}\n` +
-                      `📱 User: ${this.bridge.whatsappBot.sock?.user?.name || 'N/A'}\n` +
-                      `📞 Contacts: ${this.bridge.contactMappings.size}\n` +
-                      `💬 Active Chats: ${this.bridge.chatMappings.size}\n` +
-                      `👥 Users: ${this.bridge.userMappings.size}\n` +
-                      `💾 Database: ${this.db ? '✅ Connected' : '❌ Disconnected'}\n` +
-                      `🔄 Processing: ${this.bridge.isProcessing ? 'Yes' : 'No'}\n` +
-                      `⏰ Uptime: ${hours}h ${minutes}m ${seconds}s\n` +
-                      `💾 Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`;
+                             `🔗 WhatsApp: ${this.bridge.whatsappBot.sock ? '✅ Connected' : '❌ Disconnected'}\n` +
+                             `📱 User: ${this.bridge.whatsappBot.sock?.user?.name || 'N/A'}\n` +
+                             `📞 Contacts: ${this.bridge.contactMappings.size}\n` +
+                             `💬 Active Chats: ${this.bridge.chatMappings.size}\n` +
+                             `👥 Users: ${this.bridge.userMappings.size}\n` +
+                             `💾 Database: ${this.db ? '✅ Connected' : '❌ Disconnected'}\n` +
+                             `🔄 Processing: ${this.bridge.isProcessing ? 'Yes' : 'No'}\n` +
+                             `⏰ Uptime: ${hours}h ${minutes}m ${seconds}s\n` +
+                             `💾 Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`;
         
         await this.bridge.telegramBot.sendMessage(chatId, status, { parse_mode: 'Markdown' });
     }
@@ -196,10 +196,11 @@ class TelegramCommands {
             // Save current mappings before restart
             await this.saveMappings();
             
-            // Clear mappings
+            // Clear mappings (this might be redundant if loading overwrites, but good for explicit reset)
             this.bridge.chatMappings.clear();
             this.bridge.userMappings.clear();
-            
+            this.bridge.contactMappings.clear(); // Clear contact mappings as well
+
             // Reload from database
             await this.loadMappings();
             
@@ -285,14 +286,14 @@ class TelegramCommands {
         switch (action) {
             case 'start':
                 try {
-                    if (this.bridge.telegramBot) {
-                        await this.bridge.telegramBot.sendMessage(chatId, '⚠️ Bridge is already running');
+                    if (this.bridge.telegramBot && this.bridge.telegramBot.isPolling()) { // Check if bot is actively polling
+                        await this.bridge.telegramBot.sendMessage(chatId, '⚠️ Bridge is already running.');
                         return;
                     }
                     
-                    await this.bridge.initialize();
+                    await this.bridge.initialize(); // Assuming initialize sets up telegramBot
                     await this.loadMappings(); // Load mappings after start
-                    await this.bridge.telegramBot.sendMessage(chatId, '✅ Bridge started successfully');
+                    await this.bridge.telegramBot.sendMessage(chatId, '✅ Bridge started successfully.');
                 } catch (error) {
                     await this.bridge.telegramBot.sendMessage(chatId, `❌ Failed to start bridge: ${error.message}`);
                 }
@@ -302,7 +303,8 @@ class TelegramCommands {
                 try {
                     await this.saveMappings(); // Save before stop
                     await this.bridge.shutdown();
-                    // Note: Can't send message after shutdown as bot is stopped
+                    // Note: Cannot send message after shutdown as bot is stopped.
+                    // You might consider a delayed message or a log for confirmation.
                 } catch (error) {
                     logger.error('Failed to stop bridge:', error);
                 }
@@ -320,10 +322,60 @@ class TelegramCommands {
 
     async handleDatabase(chatId, args) {
         if (!this.db) {
-            await this.bridge.telegramBot.sendMessage(chatId, '❌ Database not connected');
+            await this.bridge.telegramBot.sendMessage(chatId, '❌ Database not connected.');
             return;
         }
 
         if (args.length === 0) {
             await this.bridge.telegramBot.sendMessage(chatId, 
-                '❓ Usage: /db <action>\n\nActions:\n• save -
+                '❓ Usage: /db <action>\n\nActions:\n• save - Save current mappings to DB\n• load - Load mappings from DB\n• clear - Clear all mappings in DB');
+            return;
+        }
+
+        const action = args[0].toLowerCase();
+
+        try {
+            switch (action) {
+                case 'save':
+                    await this.saveMappings();
+                    await this.bridge.telegramBot.sendMessage(chatId, '💾 Mappings saved to database.');
+                    break;
+                case 'load':
+                    await this.loadMappings();
+                    await this.bridge.telegramBot.sendMessage(chatId, '📊 Mappings loaded from database.');
+                    break;
+                case 'clear':
+                    await this.db.collection('bridge_mappings').deleteMany({});
+                    await this.db.collection('user_mappings').deleteMany({});
+                    await this.db.collection('contact_mappings').deleteMany({});
+                    this.bridge.chatMappings.clear();
+                    this.bridge.userMappings.clear();
+                    this.bridge.contactMappings.clear();
+                    await this.bridge.telegramBot.sendMessage(chatId, '🗑️ All database mappings cleared.');
+                    break;
+                default:
+                    await this.bridge.telegramBot.sendMessage(chatId, `❌ Unknown database action: ${action}\nUse: save, load, or clear.`);
+            }
+        } catch (error) {
+            logger.error(`❌ Error handling database command ${action}:`, error);
+            await this.bridge.telegramBot.sendMessage(chatId, `❌ Failed to execute database command: ${error.message}`);
+        }
+    }
+
+    // You might also want a help command to list all available commands
+    async handleHelp(chatId) {
+        const helpText = `📚 *Available Commands:*\n\n` +
+                         `/start - Get a welcome message and summary.\n` +
+                         `/status - Check the current bridge status.\n` +
+                         `/restart - Restart the bridge (saves and reloads mappings).\n` +
+                         `/send <number> <message> - Send a WhatsApp message to a specific number.\n` +
+                         `/contacts - List synced WhatsApp contacts.\n` +
+                         `/sync - Manually sync WhatsApp contacts to the database.\n` +
+                         `/bridge <start|stop|status> - Control the bridge's operation.\n` +
+                         `/db <save|load|clear> - Perform database operations on mappings.\n\n` +
+                         `_Note: Commands starting with '/' are for bot control._`;
+        await this.bridge.telegramBot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
+    }
+}
+
+module.exports = TelegramCommands;
