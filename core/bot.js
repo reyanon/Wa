@@ -7,7 +7,7 @@ const config = require('../config');
 const logger = require('./logger'); // Assuming logger.js is in the same directory as this file
 const MessageHandler = require('./message-handler'); // Assuming message-handler.js is in the same directory
 const TelegramBridge = require('./bridge'); // Assuming bridge.js is in the same directory
-const { connectDb, closeDb } = require('./db'); // Import connectDb and closeDb from db.js (assuming it's relative to this file)
+const { connectDb, closeDb } = require('../utils//db'); // Import connectDb and closeDb from db.js (assuming it's relative to this file)
 
 class AdvancedWhatsAppBot {
     constructor() {
