@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const TelegramCommands = require('./comands'); // Ensure this path is correct
+const TelegramCommands = require('./commands'); // Ensure this path is correct
 const config = require('../config');
 const logger = require('./logger');
 const { connectDb, closeDb } = require('./db'); // Import connectDb and closeDb
