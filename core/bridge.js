@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const TelegramCommands = require('./comands'); // Ensure this path is correct
+const TelegramCommands = require('./commands'); // Ensure this path is correct
 const config = require('../config');
 const logger = require('./logger');
 const { connectDb, closeDb } = require('./db'); // Import connectDb and closeDb
@@ -34,7 +34,7 @@ class TelegramBridge {
 
     async initialize(dbInstance) {
         const token = config.get('telegram.botToken');
-        const chatId = config.get('telegram.chatId'); // Main Telegram Supergroup Chat ID
+        const chatId = config.get('telegram.chatId');
         
         if (!token || token.includes('YOUR_BOT_TOKEN') || !chatId || chatId.includes('YOUR_CHAT_ID')) {
             logger.warn('⚠️ Telegram bot token or chat ID not configured properly. Bridging will not start.');
@@ -86,7 +86,7 @@ class TelegramBridge {
             logger.info('🚀 Telegram bridge initialized and ready.');
 
         } catch (error) {
-            logger.error('❌ Failed to initialize Telegram bridge:', error);
+            logger.error('❌ Failed to initialize Telegram bridge:', error.message || error); // MODIFIED THIS LINE
             // Propagate error if critical, or handle gracefully
         }
     }
