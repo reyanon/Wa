@@ -1,144 +1,205 @@
 const fs = require('fs-extra');
 const path = require('path');
-const logger = require('../core/logger');
+const logger = require('./logger');
 
-class ModuleLoader {
+/**
+ * Module Manager for NexusWA
+ * Loads and validates modules from modules/ and modules/custom/
+ */
+class ModuleManager {
     constructor(bot) {
         this.bot = bot;
-        this.loadedModules = new Map();
-        this.modulesPath = path.join(__dirname, '../modules');
-        this.customModulesPath = path.join(this.modulesPath, 'custom-modules');
+        this.modules = new Map();
+        this.commands = new Map();
+        this.systemModulesPath = path.join(__dirname, '../modules');
+        this.customModulesPath = path.join(__dirname, '../modules/custom');
+        this.systemCount = 0;
+        this.customCount = 0;
     }
 
-    async loadModules() {
+    /**
+     * Initialize and load all modules
+     */
+    async initialize() {
         logger.info('📦 Loading modules...');
         
-        // Ensure directories exist
-        await fs.ensureDir(this.modulesPath);
-        await fs.ensureDir(this.customModulesPath);
-
-        // Load core modules
-        await this.loadCoreModules();
-        
-        // Load custom modules
-        await this.loadCustomModules();
-        
-        logger.info(`✅ Loaded ${this.loadedModules.size} modules`);
-    }
-
-    async loadCoreModules() {
-        const coreModuleDirs = [
-            'general',
-            'fun', 
-            'utilities',
-            'admin',
-            'downloads'
-        ];
-
-        for (const dir of coreModuleDirs) {
-            const dirPath = path.join(this.modulesPath, dir);
-            if (await fs.pathExists(dirPath)) {
-                await this.loadModulesFromDirectory(dirPath, 'core');
-            }
-        }
-    }
-
-    async loadCustomModules() {
-        if (await fs.pathExists(this.customModulesPath)) {
-            await this.loadModulesFromDirectory(this.customModulesPath, 'custom');
-        }
-    }
-
-    async loadModulesFromDirectory(dirPath, type) {
         try {
-            const files = await fs.readdir(dirPath);
+            // Ensure directories exist
+            await fs.ensureDir(this.systemModulesPath);
+            await fs.ensureDir(this.customModulesPath);
+            
+            // Load system modules
+            this.systemCount = await this.loadModulesFromPath(this.systemModulesPath, 'system');
+            
+            // Load custom modules
+            this.customCount = await this.loadModulesFromPath(this.customModulesPath, 'custom');
+            
+            logger.info(`✅ Module loading complete:`);
+            logger.info(`   • System modules: ${this.systemCount}`);
+            logger.info(`   • Custom modules: ${this.customCount}`);
+            logger.info(`   • Total modules: ${this.systemCount + this.customCount}`);
+            
+        } catch (error) {
+            logger.error('❌ Failed to load modules:', error);
+        }
+    }
+
+    /**
+     * Load modules from a specific path
+     */
+    async loadModulesFromPath(modulePath, type) {
+        let loadedCount = 0;
+        
+        try {
+            const files = await fs.readdir(modulePath);
             
             for (const file of files) {
                 if (file.endsWith('.js')) {
-                    await this.loadModule(path.join(dirPath, file), type);
+                    const fullPath = path.join(modulePath, file);
+                    const success = await this.loadModule(fullPath, type);
+                    if (success) loadedCount++;
                 }
             }
         } catch (error) {
-            logger.error(`Error loading modules from ${dirPath}:`, error);
+            logger.debug(`Could not read directory ${modulePath}:`, error.message);
         }
+        
+        return loadedCount;
     }
 
+    /**
+     * Load and validate a single module
+     */
     async loadModule(modulePath, type) {
         try {
             const moduleId = path.basename(modulePath, '.js');
             
+            // Skip if already loaded
+            if (this.modules.has(moduleId)) {
+                return false;
+            }
+            
             // Clear require cache for hot reloading
             delete require.cache[require.resolve(modulePath)];
             
-            const ModuleClass = require(modulePath);
-            const moduleInstance = new ModuleClass(this.bot);
+            const moduleData = require(modulePath);
             
             // Validate module structure
-            if (!this.validateModule(moduleInstance)) {
+            const validation = this.validateModuleStructure(moduleData, moduleId);
+            if (!validation.valid) {
                 logger.warn(`⚠️ Invalid module structure: ${moduleId}`);
-                return;
+                logger.warn(`   Missing: ${validation.missing.join(', ')}`);
+                this.showRequiredStructure();
+                return false;
             }
-
-            // Initialize module
-            if (moduleInstance.init) {
-                await moduleInstance.init();
-            }
-
+            
             // Register commands
-            if (moduleInstance.commands) {
-                for (const command of moduleInstance.commands) {
-                    this.bot.messageHandler.registerCommandHandler(command.name, command);
+            if (moduleData.commands) {
+                for (const command of moduleData.commands) {
+                    if (command.name) {
+                        this.commands.set(command.name, {
+                            ...command,
+                            module: moduleData.name
+                        });
+                    }
                 }
             }
-
-            this.loadedModules.set(moduleId, {
-                instance: moduleInstance,
+            
+            this.modules.set(moduleId, {
+                ...moduleData,
                 type,
-                path: modulePath,
                 loaded: new Date()
             });
-
-            logger.info(`✅ Loaded ${type} module: ${moduleId}`);
+            
+            logger.info(`✅ Loaded ${type} module: ${moduleData.name} v${moduleData.version}`);
+            return true;
+            
         } catch (error) {
-            logger.error(`❌ Failed to load module ${modulePath}:`, error);
+            logger.error(`❌ Failed to load module ${modulePath}:`, error.message);
+            return false;
         }
     }
 
-    validateModule(module) {
-        return (
-            module &&
-            typeof module === 'object' &&
-            module.name &&
-            module.version &&
-            (module.commands || module.handlers)
-        );
+    /**
+     * Validate module structure
+     */
+    validateModuleStructure(moduleData, moduleId) {
+        const required = ['name', 'version', 'description', 'commands'];
+        const missing = [];
+        
+        for (const field of required) {
+            if (!moduleData[field]) {
+                missing.push(field);
+            }
+        }
+        
+        // Check commands structure
+        if (moduleData.commands && Array.isArray(moduleData.commands)) {
+            for (const command of moduleData.commands) {
+                if (!command.name || !command.description || !command.usage || !command.execute) {
+                    missing.push('commands[].{name|description|usage|execute}');
+                    break;
+                }
+            }
+        }
+        
+        return {
+            valid: missing.length === 0,
+            missing
+        };
     }
 
-    async reloadModule(moduleId) {
-        const moduleInfo = this.loadedModules.get(moduleId);
-        if (!moduleInfo) {
-            throw new Error(`Module ${moduleId} not found`);
-        }
-
-        // Unload module
-        if (moduleInfo.instance.destroy) {
-            await moduleInfo.instance.destroy();
-        }
-
-        // Reload module
-        await this.loadModule(moduleInfo.path, moduleInfo.type);
-        logger.info(`🔄 Reloaded module: ${moduleId}`);
+    /**
+     * Show required module structure
+     */
+    showRequiredStructure() {
+        logger.info(`📋 Required module structure:`);
+        logger.info(`   {`);
+        logger.info(`     name: 'Module Name',`);
+        logger.info(`     version: '1.0.0',`);
+        logger.info(`     description: 'Module description',`);
+        logger.info(`     commands: [`);
+        logger.info(`       {`);
+        logger.info(`         name: 'command',`);
+        logger.info(`         description: 'Command description',`);
+        logger.info(`         usage: 'prefix + command [args]',`);
+        logger.info(`         execute: async (message, args, context) => {}`);
+        logger.info(`       }`);
+        logger.info(`     ]`);
+        logger.info(`   }`);
     }
 
-    getLoadedModules() {
-        return Array.from(this.loadedModules.entries()).map(([id, info]) => ({
-            id,
-            name: info.instance.name,
-            version: info.instance.version,
-            type: info.type,
-            loaded: info.loaded
-        }));
+    /**
+     * Get command handler
+     */
+    getCommand(commandName) {
+        return this.commands.get(commandName);
+    }
+
+    /**
+     * Get module statistics
+     */
+    getModuleStats() {
+        return {
+            system: this.systemCount,
+            custom: this.customCount,
+            total: this.systemCount + this.customCount
+        };
+    }
+
+    /**
+     * Get all loaded modules
+     */
+    getModules() {
+        return Array.from(this.modules.values());
+    }
+
+    /**
+     * Get all commands
+     */
+    getCommands() {
+        return Array.from(this.commands.values());
     }
 }
 
-module.exports = ModuleLoader;
+module.exports = ModuleManager;
