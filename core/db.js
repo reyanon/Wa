@@ -1,5 +1,5 @@
 const { MongoClient } = require('mongodb');
-const config = require('./config'); // Assuming config is one level up relative to where db.js is
+const config = require('../config'); // Assuming config is one level up relative to where db.js is
 
 let _db; // Private variable to hold the database instance
 
