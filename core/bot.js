@@ -147,7 +147,7 @@ class AdvancedWhatsAppBot {
         }
         
         if (this.sock) {
-            await this.sock.logout();
+            await this.sock.end();
         }
         
         await db.disconnect();
