@@ -1,3 +1,4 @@
+const config = require('../config');
 const { MongoClient } = require('mongodb');
 
 const MONGO_URI = config.get('database.mongodb.uri');
