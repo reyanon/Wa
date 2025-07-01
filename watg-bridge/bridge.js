@@ -54,10 +54,7 @@ class TelegramBridge {
             await this.setupTelegramHandlers();
             await this.loadMappingsFromDb();
             
-            if (config.get('telegram.autoSyncContacts') !== false) {
-                await this.syncContacts();
-                await this.updateTopicNames();
-            }
+            // WhatsApp-dependent sync/update logic moved to syncWhatsAppConnection
             
             logger.info('✅ Telegram bridge initialized');
         } catch (error) {
@@ -1380,6 +1377,13 @@ class TelegramBridge {
 
         if (this.botChatId) {
             await this.commands.handleStart(this.botChatId);
+        }
+
+        // Moved WhatsApp-dependent functions here
+        await this.setupWhatsAppHandlers();
+        if (config.get('telegram.autoSyncContacts') !== false) {
+            await this.syncContacts();
+            await this.updateTopicNames();
         }
     }
 
