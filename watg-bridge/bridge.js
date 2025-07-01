@@ -183,57 +183,80 @@ class TelegramBridge {
         }
     }
 
-    // FIXED: Proper contact sync like watgbridge
-    async syncContacts() {
-        try {
-            if (!this.whatsappBot?.sock?.user) {
-                logger.warn('⚠️ WhatsApp not connected, skipping contact sync');
-                return;
-            }
-            
-            logger.info('📞 Syncing contacts from WhatsApp...');
-            
-            // Get contacts from WhatsApp store (like watgbridge does)
-            const contacts = this.whatsappBot.sock.store?.contacts || {};
-            const contactEntries = Object.entries(contacts);
-            
-            logger.debug(`🔍 Found ${contactEntries.length} contacts in WhatsApp store`);
-            
-            let syncedCount = 0;
-            
-            for (const [jid, contact] of contactEntries) {
-                if (!jid || jid === 'status@broadcast' || !contact) continue;
-                
-                const phone = jid.split('@')[0];
-                let contactName = null;
-                
-                // Extract name from contact (like watgbridge)
-                if (contact.name) {
-                    contactName = contact.name;
-                } else if (contact.notify) {
-                    contactName = contact.notify;
-                } else if (contact.verifiedName) {
-                    contactName = contact.verifiedName;
-                }
-                
-                if (contactName && contactName !== phone) {
-                    const existingName = this.contactMappings.get(phone);
-                    if (existingName !== contactName) {
-                        await this.saveContactMapping(phone, contactName);
-                        syncedCount++;
-                        logger.debug(`📞 Synced contact: ${phone} -> ${contactName}`);
-                    }
-                }
-            }
-            
-            logger.info(`✅ Synced ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
-            await this.logToTelegram('✅ Contact Sync Complete', `Synced ${syncedCount} new/updated contacts. Total: ${this.contactMappings.size}`);
-            
-        } catch (error) {
-            logger.error('❌ Failed to sync contacts:', error);
-            await this.logToTelegram('❌ Contact Sync Failed', `Error: ${error.message}`);
+async syncContacts() {
+    try {
+        if (!this.whatsappBot?.sock?.user) {
+            logger.warn('⚠️ WhatsApp not connected, skipping contact sync');
+            return;
         }
+        
+        logger.info('📞 Syncing contacts from WhatsApp...');
+        
+        // DEBUG: Check what's available
+        logger.debug('🔍 WhatsApp sock store:', !!this.whatsappBot.sock.store);
+        logger.debug('🔍 WhatsApp contacts store:', !!this.whatsappBot.sock.store?.contacts);
+        
+        const contacts = this.whatsappBot.sock.store?.contacts || {};
+        const contactEntries = Object.entries(contacts);
+        
+        logger.debug(`🔍 Found ${contactEntries.length} contacts in WhatsApp store`);
+        
+        // DEBUG: Log first few contacts (without sensitive info)
+        if (contactEntries.length > 0) {
+            logger.debug('🔍 Sample contacts:', contactEntries.slice(0, 3).map(([jid, contact]) => ({
+                jid: jid.substring(0, 10) + '***',
+                hasName: !!contact.name,
+                hasNotify: !!contact.notify,
+                hasVerifiedName: !!contact.verifiedName
+            })));
+        } else {
+            logger.warn('⚠️ No contacts found in WhatsApp store');
+            
+            // Try alternative method to get contacts
+            try {
+                logger.info('🔄 Attempting to fetch contacts from WhatsApp...');
+                const waContacts = await this.whatsappBot.sock.store.fetchContacts();
+                logger.debug(`🔍 Fetched ${Object.keys(waContacts || {}).length} contacts`);
+            } catch (fetchError) {
+                logger.warn('⚠️ Could not fetch contacts:', fetchError.message);
+            }
+        }
+        
+        let syncedCount = 0;
+        
+        for (const [jid, contact] of contactEntries) {
+            if (!jid || jid === 'status@broadcast' || !contact) continue;
+            
+            const phone = jid.split('@')[0];
+            let contactName = null;
+            
+            // Extract name from contact (like watgbridge)
+            if (contact.name) {
+                contactName = contact.name;
+            } else if (contact.notify) {
+                contactName = contact.notify;
+            } else if (contact.verifiedName) {
+                contactName = contact.verifiedName;
+            }
+            
+            if (contactName && contactName !== phone) {
+                const existingName = this.contactMappings.get(phone);
+                if (existingName !== contactName) {
+                    await this.saveContactMapping(phone, contactName);
+                    syncedCount++;
+                    logger.debug(`📞 Synced contact: ${phone} -> ${contactName}`);
+                }
+            }
+        }
+        
+        logger.info(`✅ Synced ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
+        await this.logToTelegram('✅ Contact Sync Complete', `Synced ${syncedCount} new/updated contacts. Total: ${this.contactMappings.size}`);
+        
+    } catch (error) {
+        logger.error('❌ Failed to sync contacts:', error);
+        await this.logToTelegram('❌ Contact Sync Failed', `Error: ${error.message}`);
     }
+}
 
     async updateTopicNames() {
         try {
