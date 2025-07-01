@@ -829,7 +829,7 @@ class TelegramBridge {
     }
 
     // FIXED: Presence implementation (like watgbridge)
-    async sendPresence(jid, isTyping = false) {
+    async sendPresence(jid, isTyping = true) {
         try {
             if (!this.whatsappBot?.sock) return;
             
