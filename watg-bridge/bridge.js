@@ -27,8 +27,8 @@ class TelegramBridge {
         this.botChatId = null;
         this.db = null;
         this.collection = null;
-        this.messageQueue = new Map(); // For read receipts
-        this.lastPresenceUpdate = new Map(); // Track presence updates
+        this.messageQueue = new Map();
+        this.lastPresenceUpdate = new Map();
     }
 
     async initialize() {
@@ -183,7 +183,7 @@ class TelegramBridge {
         }
     }
 
-    // FIXED: Proper contact sync like watgbridge
+    // FIXED: Proper contact sync that gets real contact names, not handle names
     async syncContacts() {
         try {
             if (!this.whatsappBot?.sock?.user) {
@@ -193,7 +193,7 @@ class TelegramBridge {
             
             logger.info('📞 Syncing contacts from WhatsApp...');
             
-            // Get contacts from WhatsApp store (like watgbridge does)
+            // Get contacts from WhatsApp store 
             const contacts = this.whatsappBot.sock.store?.contacts || {};
             const contactEntries = Object.entries(contacts);
             
@@ -207,7 +207,7 @@ class TelegramBridge {
                 const phone = jid.split('@')[0];
                 let contactName = null;
                 
-                // Extract name from contact (like watgbridge)
+                // Extract name from contact 
                 if (contact.name) {
                     contactName = contact.name;
                 } else if (contact.notify) {
@@ -260,7 +260,7 @@ class TelegramBridge {
                     } catch (error) {
                         logger.error(`❌ Failed to update topic ${topicId} for ${phone}:`, error);
                     }
-                    await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit
+                    await new Promise(resolve => setTimeout(resolve, 100));
                 }
             }
             
@@ -336,16 +336,28 @@ class TelegramBridge {
         }
     }
 
+    // FIXED: Message sync with proper sender detection
     async syncMessage(whatsappMsg, text) {
         if (!this.telegramBot || !config.get('telegram.enabled')) return;
 
         const sender = whatsappMsg.key.remoteJid;
         const participant = whatsappMsg.key.participant || sender;
+        const isFromMe = whatsappMsg.key.fromMe;
+        
+        // FIXED: Don't create topics for messages sent by me
+        if (isFromMe) {
+            // For outgoing messages, just sync to existing topic if it exists
+            const existingTopicId = this.chatMappings.get(sender);
+            if (existingTopicId) {
+                await this.syncOutgoingMessage(whatsappMsg, text, existingTopicId, sender);
+            }
+            return;
+        }
         
         await this.createUserMapping(participant, whatsappMsg);
         const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
         
-        // FIXED: Proper video note detection (like watgbridge)
+        // FIXED: Proper video note detection
         if (whatsappMsg.message?.videoMessage?.ptv) {
             await this.handleWhatsAppMedia(whatsappMsg, 'video_note', topicId);
         } else if (whatsappMsg.message?.imageMessage) {
@@ -377,13 +389,39 @@ class TelegramBridge {
             }
         }
 
-        // FIXED: Add message to read receipt queue
         if (whatsappMsg.key?.id && config.get('telegram.sendReadReceipts') !== false) {
             this.queueMessageForReadReceipt(sender, whatsappMsg.key);
         }
     }
 
-    // FIXED: Read receipt implementation (like watgbridge)
+    // FIXED: Handle outgoing messages properly
+    async syncOutgoingMessage(whatsappMsg, text, topicId, sender) {
+        try {
+            if (whatsappMsg.message?.videoMessage?.ptv) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'video_note', topicId, true);
+            } else if (whatsappMsg.message?.imageMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId, true);
+            } else if (whatsappMsg.message?.videoMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId, true);
+            } else if (whatsappMsg.message?.audioMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId, true);
+            } else if (whatsappMsg.message?.documentMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId, true);
+            } else if (whatsappMsg.message?.stickerMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId, true);
+            } else if (whatsappMsg.message?.locationMessage) { 
+                await this.handleWhatsAppLocation(whatsappMsg, topicId, true);
+            } else if (whatsappMsg.message?.contactMessage) { 
+                await this.handleWhatsAppContact(whatsappMsg, topicId, true);
+            } else if (text) {
+                const messageText = `📤 You: ${text}`;
+                await this.sendSimpleMessage(topicId, messageText, sender);
+            }
+        } catch (error) {
+            logger.error('❌ Failed to sync outgoing message:', error);
+        }
+    }
+
     queueMessageForReadReceipt(chatJid, messageKey) {
         if (!this.messageQueue.has(chatJid)) {
             this.messageQueue.set(chatJid, []);
@@ -391,7 +429,6 @@ class TelegramBridge {
         
         this.messageQueue.get(chatJid).push(messageKey);
         
-        // Process read receipts after a delay
         setTimeout(() => {
             this.processReadReceipts(chatJid);
         }, 2000);
@@ -425,9 +462,8 @@ class TelegramBridge {
         let userPhone = participant.split('@')[0];
         
         try {
-            if (whatsappMsg.pushName) {
-                userName = whatsappMsg.pushName;
-            } else if (this.contactMappings.has(userPhone)) {
+            // FIXED: Don't use pushName as contact name, only for display
+            if (this.contactMappings.has(userPhone)) {
                 userName = this.contactMappings.get(userPhone);
             }
         } catch (error) {
@@ -569,7 +605,6 @@ class TelegramBridge {
         }
     }
 
-    // FIXED: Call notification handling (like watgbridge)
     async handleCallNotification(callEvent) {
         if (!this.telegramBot) return;
 
@@ -613,8 +648,8 @@ class TelegramBridge {
         }
     }
 
-    // FIXED: Media handling with proper stream processing
-    async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
+    // FIXED: Media handling with proper video note detection
+    async handleWhatsAppMedia(whatsappMsg, mediaType, topicId, isOutgoing = false) {
         try {
             logger.info(`📥 Processing ${mediaType} from WhatsApp`);
             
@@ -656,7 +691,6 @@ class TelegramBridge {
 
             logger.info(`📥 Downloading ${mediaType} from WhatsApp: ${fileName}`);
 
-            // FIXED: Proper media download (like watgbridge)
             const downloadType = mediaType === 'sticker' ? 'sticker' : 
                                 mediaType === 'video_note' ? 'video' : 
                                 mediaType;
@@ -683,7 +717,10 @@ class TelegramBridge {
             const sender = whatsappMsg.key.remoteJid;
             const participant = whatsappMsg.key.participant || sender;
             
-            if (sender.endsWith('@g.us') && participant !== sender) {
+            // FIXED: Handle outgoing messages properly
+            if (isOutgoing) {
+                caption = caption ? `📤 You: ${caption}` : '📤 You sent media';
+            } else if (sender.endsWith('@g.us') && participant !== sender) {
                 const senderPhone = participant.split('@')[0];
                 const senderName = this.contactMappings.get(senderPhone) || senderPhone;
                 caption = `👤 ${senderName}:\n${caption || ''}`;
@@ -714,6 +751,7 @@ class TelegramBridge {
                     break;
 
                 case 'video_note':
+                    // FIXED: Proper video note handling
                     await this.telegramBot.sendVideoNote(chatId, filePath, {
                         message_thread_id: topicId
                     });
@@ -773,7 +811,7 @@ class TelegramBridge {
         }
     }
 
-    async handleWhatsAppLocation(whatsappMsg, topicId) {
+    async handleWhatsAppLocation(whatsappMsg, topicId, isOutgoing = false) {
         try {
             const locationMessage = whatsappMsg.message.locationMessage;
             
@@ -781,7 +819,9 @@ class TelegramBridge {
             const participant = whatsappMsg.key.participant || sender;
             let caption = '';
             
-            if (sender.endsWith('@g.us') && participant !== sender) {
+            if (isOutgoing) {
+                caption = '📤 You shared location';
+            } else if (sender.endsWith('@g.us') && participant !== sender) {
                 const senderPhone = participant.split('@')[0];
                 const senderName = this.contactMappings.get(senderPhone) || senderPhone;
                 caption = `👤 ${senderName} shared location`;
@@ -803,7 +843,7 @@ class TelegramBridge {
         }
     }
 
-    async handleWhatsAppContact(whatsappMsg, topicId) {
+    async handleWhatsAppContact(whatsappMsg, topicId, isOutgoing = false) {
         try {
             const contactMessage = whatsappMsg.message.contactMessage;
             const displayName = contactMessage.displayName || 'Unknown Contact';
@@ -812,7 +852,9 @@ class TelegramBridge {
             const participant = whatsappMsg.key.participant || sender;
             let caption = `📇 Contact: ${displayName}`;
             
-            if (sender.endsWith('@g.us') && participant !== sender) {
+            if (isOutgoing) {
+                caption = `📤 You shared contact: ${displayName}`;
+            } else if (sender.endsWith('@g.us') && participant !== sender) {
                 const senderPhone = participant.split('@')[0];
                 const senderName = this.contactMappings.get(senderPhone) || senderPhone;
                 caption = `👤 ${senderName} shared contact: ${displayName}`;
@@ -828,15 +870,13 @@ class TelegramBridge {
         }
     }
 
-    // FIXED: Presence implementation (like watgbridge)
-    async sendPresence(jid, isTyping = false) {
+    async sendPresence(jid, isTyping = true) {
         try {
             if (!this.whatsappBot?.sock) return;
             
             const now = Date.now();
             const lastUpdate = this.lastPresenceUpdate.get(jid) || 0;
             
-            // Rate limit presence updates (like watgbridge)
             if (now - lastUpdate < 1000) return;
             
             this.lastPresenceUpdate.set(jid, now);
@@ -887,7 +927,6 @@ class TelegramBridge {
                 return;
             }
 
-            // FIXED: Send presence when typing (like watgbridge)
             await this.sendPresence(whatsappJid, true);
 
             if (msg.photo) {
@@ -927,14 +966,12 @@ class TelegramBridge {
                 if (sendResult?.key?.id) {
                     await this.setReaction(msg.chat.id, msg.message_id, '👍');
                     
-                    // FIXED: Send read receipt after sending (like watgbridge)
                     setTimeout(async () => {
                         await this.markAsRead(whatsappJid, [sendResult.key]);
                     }, 1000);
                 }
             }
 
-            // FIXED: Send available presence after message (like watgbridge)
             setTimeout(async () => {
                 await this.sendPresence(whatsappJid, false);
             }, 2000);
@@ -966,7 +1003,7 @@ class TelegramBridge {
         }
     }
 
-    // FIXED: Telegram media handling with proper sticker conversion (like watgbridge)
+    // FIXED: Telegram media handling with proper sticker conversion for WhatsApp
     async handleTelegramMedia(msg, mediaType) {
         try {
             const topicId = msg.message_thread_id;
@@ -1051,10 +1088,11 @@ class TelegramBridge {
                     break;
 
                 case 'video_note':
+                    // FIXED: Proper video note sending to WhatsApp
                     messageOptions = {
                         video: fs.readFileSync(filePath),
                         caption: caption,
-                        ptv: true, // FIXED: Proper video note flag
+                        ptv: true, // This is the key for video notes
                         viewOnce: hasMediaSpoiler
                     };
                     break;
@@ -1098,28 +1136,34 @@ class TelegramBridge {
                     try {
                         const stickerBuffer = fs.readFileSync(filePath);
 
-                        // FIXED: Proper sticker conversion (like watgbridge)
+                        // FIXED: Proper sticker conversion for WhatsApp (512x512, WebP format)
                         const convertedPath = filePath.replace('.webp', '-wa.webp');
+                        
+                        // Convert to WhatsApp sticker format
                         await sharp(stickerBuffer)
                             .resize(512, 512, {
                                 fit: 'contain',
                                 background: { r: 0, g: 0, b: 0, alpha: 0 }
                             })
                             .webp({ 
+                                quality: 100,
                                 lossless: false,
-                                quality: 90,
                                 effort: 6
                             })
                             .toFile(convertedPath);
 
+                        // Read the converted sticker
+                        const convertedBuffer = fs.readFileSync(convertedPath);
+
                         messageOptions = {
-                            sticker: fs.readFileSync(convertedPath)
+                            sticker: convertedBuffer
                         };
 
+                        // Clean up converted file
                         setTimeout(() => fs.unlink(convertedPath).catch(() => {}), 5000);
 
                     } catch (conversionError) {
-                        logger.warn('🧊 Sticker conversion failed, sending as image');
+                        logger.warn('🧊 Sticker conversion failed, sending as image:', conversionError);
 
                         messageOptions = {
                             image: fs.readFileSync(filePath),
@@ -1137,7 +1181,6 @@ class TelegramBridge {
                 logger.info(`✅ Successfully sent ${mediaType} to WhatsApp`);
                 await this.setReaction(msg.chat.id, msg.message_id, '👍');
                 
-                // FIXED: Send read receipt (like watgbridge)
                 setTimeout(async () => {
                     await this.markAsRead(whatsappJid, [sendResult.key]);
                 }, 1000);
@@ -1288,21 +1331,18 @@ class TelegramBridge {
         }
     }
 
-    // FIXED: WhatsApp event handlers setup (like watgbridge)
     async setupWhatsAppHandlers() {
         if (!this.whatsappBot?.sock) {
             logger.warn('⚠️ WhatsApp socket not available for setting up handlers');
             return;
         }
 
-        // Call event handler
         this.whatsappBot.sock.ev.on('call', async (calls) => {
             for (const call of calls) {
                 await this.handleCallNotification(call);
             }
         });
 
-        // Contact updates handler
         this.whatsappBot.sock.ev.on('contacts.update', async (contacts) => {
             try {
                 let updatedCount = 0;
@@ -1311,12 +1351,15 @@ class TelegramBridge {
                         const phone = contact.id.split('@')[0];
                         const oldName = this.contactMappings.get(phone);
                         
-                        if (oldName !== contact.name) {
+                        // Only update if it's a real contact name (not handle name)
+                        if (contact.name !== phone && 
+                            !contact.name.startsWith('+') && 
+                            contact.name.length > 2 &&
+                            oldName !== contact.name) {
                             await this.saveContactMapping(phone, contact.name);
                             logger.info(`📞 Updated contact: ${phone} -> ${contact.name}`);
                             updatedCount++;
                             
-                            // Update topic name if exists
                             const jid = contact.id;
                             if (this.chatMappings.has(jid)) {
                                 const topicId = this.chatMappings.get(jid);
@@ -1332,22 +1375,27 @@ class TelegramBridge {
                         }
                     }
                 }
-                logger.info(`✅ Processed ${updatedCount} contact updates`);
-                await this.logToTelegram('✅ Contact Updates Processed', `Updated ${updatedCount} contacts.`);
+                if (updatedCount > 0) {
+                    logger.info(`✅ Processed ${updatedCount} contact updates`);
+                    await this.logToTelegram('✅ Contact Updates Processed', `Updated ${updatedCount} contacts.`);
+                }
             } catch (error) {
                 logger.error('❌ Failed to process contact updates:', error);
                 await this.logToTelegram('❌ Contact Updates Failed', `Error: ${error.message}`);
             }
         });
 
-        // Contacts upsert handler (like watgbridge)
         this.whatsappBot.sock.ev.on('contacts.upsert', async (contacts) => {
             try {
                 let newCount = 0;
                 for (const contact of contacts) {
                     if (contact.id && contact.name) {
                         const phone = contact.id.split('@')[0];
-                        if (!this.contactMappings.has(phone)) {
+                        // Only save real contact names
+                        if (contact.name !== phone && 
+                            !contact.name.startsWith('+') && 
+                            contact.name.length > 2 &&
+                            !this.contactMappings.has(phone)) {
                             await this.saveContactMapping(phone, contact.name);
                             logger.info(`📞 New contact: ${phone} -> ${contact.name}`);
                             newCount++;
