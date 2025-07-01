@@ -283,7 +283,7 @@ async syncContacts() {
                     } catch (error) {
                         logger.error(`❌ Failed to update topic ${topicId} for ${phone}:`, error);
                     }
-                    await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit
+                    await new Promise(resolve => setTimeout(resolve, 100));
                 }
             }
             
