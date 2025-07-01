@@ -45,7 +45,7 @@ class MessageHandler {
             await this.handleNonCommandMessage(msg, text);
         }
 
-        // ALWAYS sync to Telegram if bridge is active (this was the main issue)
+        // FIXED: ALWAYS sync to Telegram if bridge is active (this was the main issue)
         if (this.bot.telegramBridge) {
             await this.bot.telegramBridge.syncMessage(msg, text);
         }
