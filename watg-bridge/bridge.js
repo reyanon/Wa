@@ -27,8 +27,8 @@ class TelegramBridge {
         this.botChatId = null;
         this.db = null;
         this.collection = null;
-        this.messageQueue = new Map(); // For read receipts
-        this.lastPresenceUpdate = new Map(); // Track presence updates
+        this.messageQueue = new Map();
+        this.lastPresenceUpdate = new Map();
     }
 
     async initialize() {
@@ -183,80 +183,109 @@ class TelegramBridge {
         }
     }
 
-async syncContacts() {
-    try {
-        if (!this.whatsappBot?.sock?.user) {
-            logger.warn('⚠️ WhatsApp not connected, skipping contact sync');
-            return;
-        }
-        
-        logger.info('📞 Syncing contacts from WhatsApp...');
-        
-        // DEBUG: Check what's available
-        logger.debug('🔍 WhatsApp sock store:', !!this.whatsappBot.sock.store);
-        logger.debug('🔍 WhatsApp contacts store:', !!this.whatsappBot.sock.store?.contacts);
-        
-        const contacts = this.whatsappBot.sock.store?.contacts || {};
-        const contactEntries = Object.entries(contacts);
-        
-        logger.debug(`🔍 Found ${contactEntries.length} contacts in WhatsApp store`);
-        
-        // DEBUG: Log first few contacts (without sensitive info)
-        if (contactEntries.length > 0) {
-            logger.debug('🔍 Sample contacts:', contactEntries.slice(0, 3).map(([jid, contact]) => ({
-                jid: jid.substring(0, 10) + '***',
-                hasName: !!contact.name,
-                hasNotify: !!contact.notify,
-                hasVerifiedName: !!contact.verifiedName
-            })));
-        } else {
-            logger.warn('⚠️ No contacts found in WhatsApp store');
-            
-            // Try alternative method to get contacts
-            try {
-                logger.info('🔄 Attempting to fetch contacts from WhatsApp...');
-                const waContacts = await this.whatsappBot.sock.store.fetchContacts();
-                logger.debug(`🔍 Fetched ${Object.keys(waContacts || {}).length} contacts`);
-            } catch (fetchError) {
-                logger.warn('⚠️ Could not fetch contacts:', fetchError.message);
-            }
-        }
-        
-        let syncedCount = 0;
-        
-        for (const [jid, contact] of contactEntries) {
-            if (!jid || jid === 'status@broadcast' || !contact) continue;
-            
-            const phone = jid.split('@')[0];
-            let contactName = null;
-            
-            // Extract name from contact (like watgbridge)
-            if (contact.name) {
-                contactName = contact.name;
-            } else if (contact.notify) {
-                contactName = contact.notify;
-            } else if (contact.verifiedName) {
-                contactName = contact.verifiedName;
+    // FIXED: Proper contact sync that gets real contact names, not handle names
+    async syncContacts() {
+        try {
+            if (!this.whatsappBot?.sock?.user) {
+                logger.warn('⚠️ WhatsApp not connected, skipping contact sync');
+                return;
             }
             
-            if (contactName && contactName !== phone) {
-                const existingName = this.contactMappings.get(phone);
-                if (existingName !== contactName) {
-                    await this.saveContactMapping(phone, contactName);
-                    syncedCount++;
-                    logger.debug(`📞 Synced contact: ${phone} -> ${contactName}`);
+            logger.info('📞 Syncing contacts from WhatsApp...');
+            
+            let syncedCount = 0;
+            let contacts = {};
+            
+            // Method 1: Get contacts from WhatsApp store (real contact names)
+            if (this.whatsappBot.sock.store?.contacts) {
+                contacts = this.whatsappBot.sock.store.contacts;
+                logger.debug(`🔍 Found ${Object.keys(contacts).length} contacts in store`);
+            }
+            
+            // Method 2: Try to get from authState
+            if (Object.keys(contacts).length === 0 && this.whatsappBot.sock.authState?.creds?.contacts) {
+                contacts = this.whatsappBot.sock.authState.creds.contacts;
+                logger.debug(`🔍 Found ${Object.keys(contacts).length} contacts in authState`);
+            }
+            
+            // Method 3: Get contacts from device (this gets real saved contact names)
+            if (Object.keys(contacts).length === 0) {
+                try {
+                    logger.info('🔄 Fetching contacts from device...');
+                    
+                    // Get all individual chats (not groups)
+                    const chats = Object.entries(this.whatsappBot.sock.store?.chats || {})
+                        .filter(([jid]) => jid.endsWith('@s.whatsapp.net'));
+                    
+                    for (const [jid, chat] of chats) {
+                        // Only use chat.name if it's different from phone number (real contact name)
+                        const phone = jid.split('@')[0];
+                        if (chat.name && chat.name !== phone && !chat.name.startsWith('+')) {
+                            contacts[jid] = {
+                                id: jid,
+                                name: chat.name,
+                                notify: chat.name
+                            };
+                        }
+                    }
+                    
+                    logger.debug(`🔍 Collected ${Object.keys(contacts).length} contacts from chats`);
+                    
+                } catch (fetchError) {
+                    logger.warn('⚠️ Could not fetch contacts from device:', fetchError.message);
                 }
             }
+            
+            const contactEntries = Object.entries(contacts);
+            logger.info(`📞 Processing ${contactEntries.length} contacts...`);
+            
+            if (contactEntries.length === 0) {
+                logger.warn('⚠️ No contacts found to sync');
+                await this.logToTelegram('⚠️ Contact Sync Warning', 'No contacts found. Make sure contacts are saved in WhatsApp.');
+                return;
+            }
+            
+            // Process contacts - only save real contact names, not handle names
+            for (const [jid, contact] of contactEntries) {
+                if (!jid || jid === 'status@broadcast' || !contact) continue;
+                if (jid.endsWith('@g.us')) continue; // Skip groups
+                
+                const phone = jid.split('@')[0];
+                let contactName = null;
+                
+                // FIXED: Only use contact.name if it's a real contact name (not handle/pushName)
+                // Real contact names are usually different from phone numbers and don't start with +
+                if (contact.name && 
+                    contact.name !== phone && 
+                    !contact.name.startsWith('+') && 
+                    contact.name.trim() !== '' &&
+                    contact.name.length > 2) { // Real names are usually longer than 2 chars
+                    contactName = contact.name;
+                }
+                
+                // Only save if we have a meaningful contact name
+                if (contactName) {
+                    const existingName = this.contactMappings.get(phone);
+                    if (existingName !== contactName) {
+                        await this.saveContactMapping(phone, contactName);
+                        syncedCount++;
+                        logger.debug(`📞 Synced contact: ${phone} -> ${contactName}`);
+                    }
+                }
+            }
+            
+            logger.info(`✅ Contact sync complete: ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
+            await this.logToTelegram('✅ Contact Sync Complete', 
+                `Synced ${syncedCount} new/updated contacts.\n` +
+                `Total contacts: ${this.contactMappings.size}\n` +
+                `Note: Only real saved contact names are synced, not handle names.`
+            );
+            
+        } catch (error) {
+            logger.error('❌ Failed to sync contacts:', error);
+            await this.logToTelegram('❌ Contact Sync Failed', `Error: ${error.message}`);
         }
-        
-        logger.info(`✅ Synced ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
-        await this.logToTelegram('✅ Contact Sync Complete', `Synced ${syncedCount} new/updated contacts. Total: ${this.contactMappings.size}`);
-        
-    } catch (error) {
-        logger.error('❌ Failed to sync contacts:', error);
-        await this.logToTelegram('❌ Contact Sync Failed', `Error: ${error.message}`);
     }
-}
 
     async updateTopicNames() {
         try {
@@ -359,16 +388,28 @@ async syncContacts() {
         }
     }
 
+    // FIXED: Message sync with proper sender detection
     async syncMessage(whatsappMsg, text) {
         if (!this.telegramBot || !config.get('telegram.enabled')) return;
 
         const sender = whatsappMsg.key.remoteJid;
         const participant = whatsappMsg.key.participant || sender;
+        const isFromMe = whatsappMsg.key.fromMe;
+        
+        // FIXED: Don't create topics for messages sent by me
+        if (isFromMe) {
+            // For outgoing messages, just sync to existing topic if it exists
+            const existingTopicId = this.chatMappings.get(sender);
+            if (existingTopicId) {
+                await this.syncOutgoingMessage(whatsappMsg, text, existingTopicId, sender);
+            }
+            return;
+        }
         
         await this.createUserMapping(participant, whatsappMsg);
         const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
         
-        // FIXED: Proper video note detection (like watgbridge)
+        // FIXED: Proper video note detection
         if (whatsappMsg.message?.videoMessage?.ptv) {
             await this.handleWhatsAppMedia(whatsappMsg, 'video_note', topicId);
         } else if (whatsappMsg.message?.imageMessage) {
@@ -400,13 +441,39 @@ async syncContacts() {
             }
         }
 
-        // FIXED: Add message to read receipt queue
         if (whatsappMsg.key?.id && config.get('telegram.sendReadReceipts') !== false) {
             this.queueMessageForReadReceipt(sender, whatsappMsg.key);
         }
     }
 
-    // FIXED: Read receipt implementation (like watgbridge)
+    // FIXED: Handle outgoing messages properly
+    async syncOutgoingMessage(whatsappMsg, text, topicId, sender) {
+        try {
+            if (whatsappMsg.message?.videoMessage?.ptv) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'video_note', topicId, true);
+            } else if (whatsappMsg.message?.imageMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId, true);
+            } else if (whatsappMsg.message?.videoMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'video', topicId, true);
+            } else if (whatsappMsg.message?.audioMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'audio', topicId, true);
+            } else if (whatsappMsg.message?.documentMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'document', topicId, true);
+            } else if (whatsappMsg.message?.stickerMessage) {
+                await this.handleWhatsAppMedia(whatsappMsg, 'sticker', topicId, true);
+            } else if (whatsappMsg.message?.locationMessage) { 
+                await this.handleWhatsAppLocation(whatsappMsg, topicId, true);
+            } else if (whatsappMsg.message?.contactMessage) { 
+                await this.handleWhatsAppContact(whatsappMsg, topicId, true);
+            } else if (text) {
+                const messageText = `📤 You: ${text}`;
+                await this.sendSimpleMessage(topicId, messageText, sender);
+            }
+        } catch (error) {
+            logger.error('❌ Failed to sync outgoing message:', error);
+        }
+    }
+
     queueMessageForReadReceipt(chatJid, messageKey) {
         if (!this.messageQueue.has(chatJid)) {
             this.messageQueue.set(chatJid, []);
@@ -414,7 +481,6 @@ async syncContacts() {
         
         this.messageQueue.get(chatJid).push(messageKey);
         
-        // Process read receipts after a delay
         setTimeout(() => {
             this.processReadReceipts(chatJid);
         }, 2000);
@@ -448,9 +514,8 @@ async syncContacts() {
         let userPhone = participant.split('@')[0];
         
         try {
-            if (whatsappMsg.pushName) {
-                userName = whatsappMsg.pushName;
-            } else if (this.contactMappings.has(userPhone)) {
+            // FIXED: Don't use pushName as contact name, only for display
+            if (this.contactMappings.has(userPhone)) {
                 userName = this.contactMappings.get(userPhone);
             }
         } catch (error) {
@@ -592,7 +657,6 @@ async syncContacts() {
         }
     }
 
-    // FIXED: Call notification handling (like watgbridge)
     async handleCallNotification(callEvent) {
         if (!this.telegramBot) return;
 
@@ -636,8 +700,8 @@ async syncContacts() {
         }
     }
 
-    // FIXED: Media handling with proper stream processing
-    async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
+    // FIXED: Media handling with proper video note detection
+    async handleWhatsAppMedia(whatsappMsg, mediaType, topicId, isOutgoing = false) {
         try {
             logger.info(`📥 Processing ${mediaType} from WhatsApp`);
             
@@ -679,7 +743,6 @@ async syncContacts() {
 
             logger.info(`📥 Downloading ${mediaType} from WhatsApp: ${fileName}`);
 
-            // FIXED: Proper media download (like watgbridge)
             const downloadType = mediaType === 'sticker' ? 'sticker' : 
                                 mediaType === 'video_note' ? 'video' : 
                                 mediaType;
@@ -706,7 +769,10 @@ async syncContacts() {
             const sender = whatsappMsg.key.remoteJid;
             const participant = whatsappMsg.key.participant || sender;
             
-            if (sender.endsWith('@g.us') && participant !== sender) {
+            // FIXED: Handle outgoing messages properly
+            if (isOutgoing) {
+                caption = caption ? `📤 You: ${caption}` : '📤 You sent media';
+            } else if (sender.endsWith('@g.us') && participant !== sender) {
                 const senderPhone = participant.split('@')[0];
                 const senderName = this.contactMappings.get(senderPhone) || senderPhone;
                 caption = `👤 ${senderName}:\n${caption || ''}`;
@@ -737,6 +803,7 @@ async syncContacts() {
                     break;
 
                 case 'video_note':
+                    // FIXED: Proper video note handling
                     await this.telegramBot.sendVideoNote(chatId, filePath, {
                         message_thread_id: topicId
                     });
@@ -796,7 +863,7 @@ async syncContacts() {
         }
     }
 
-    async handleWhatsAppLocation(whatsappMsg, topicId) {
+    async handleWhatsAppLocation(whatsappMsg, topicId, isOutgoing = false) {
         try {
             const locationMessage = whatsappMsg.message.locationMessage;
             
@@ -804,7 +871,9 @@ async syncContacts() {
             const participant = whatsappMsg.key.participant || sender;
             let caption = '';
             
-            if (sender.endsWith('@g.us') && participant !== sender) {
+            if (isOutgoing) {
+                caption = '📤 You shared location';
+            } else if (sender.endsWith('@g.us') && participant !== sender) {
                 const senderPhone = participant.split('@')[0];
                 const senderName = this.contactMappings.get(senderPhone) || senderPhone;
                 caption = `👤 ${senderName} shared location`;
@@ -826,7 +895,7 @@ async syncContacts() {
         }
     }
 
-    async handleWhatsAppContact(whatsappMsg, topicId) {
+    async handleWhatsAppContact(whatsappMsg, topicId, isOutgoing = false) {
         try {
             const contactMessage = whatsappMsg.message.contactMessage;
             const displayName = contactMessage.displayName || 'Unknown Contact';
@@ -835,7 +904,9 @@ async syncContacts() {
             const participant = whatsappMsg.key.participant || sender;
             let caption = `📇 Contact: ${displayName}`;
             
-            if (sender.endsWith('@g.us') && participant !== sender) {
+            if (isOutgoing) {
+                caption = `📤 You shared contact: ${displayName}`;
+            } else if (sender.endsWith('@g.us') && participant !== sender) {
                 const senderPhone = participant.split('@')[0];
                 const senderName = this.contactMappings.get(senderPhone) || senderPhone;
                 caption = `👤 ${senderName} shared contact: ${displayName}`;
@@ -851,7 +922,6 @@ async syncContacts() {
         }
     }
 
-    // FIXED: Presence implementation (like watgbridge)
     async sendPresence(jid, isTyping = true) {
         try {
             if (!this.whatsappBot?.sock) return;
@@ -859,7 +929,6 @@ async syncContacts() {
             const now = Date.now();
             const lastUpdate = this.lastPresenceUpdate.get(jid) || 0;
             
-            // Rate limit presence updates (like watgbridge)
             if (now - lastUpdate < 1000) return;
             
             this.lastPresenceUpdate.set(jid, now);
@@ -910,7 +979,6 @@ async syncContacts() {
                 return;
             }
 
-            // FIXED: Send presence when typing (like watgbridge)
             await this.sendPresence(whatsappJid, true);
 
             if (msg.photo) {
@@ -950,14 +1018,12 @@ async syncContacts() {
                 if (sendResult?.key?.id) {
                     await this.setReaction(msg.chat.id, msg.message_id, '👍');
                     
-                    // FIXED: Send read receipt after sending (like watgbridge)
                     setTimeout(async () => {
                         await this.markAsRead(whatsappJid, [sendResult.key]);
                     }, 1000);
                 }
             }
 
-            // FIXED: Send available presence after message (like watgbridge)
             setTimeout(async () => {
                 await this.sendPresence(whatsappJid, false);
             }, 2000);
@@ -989,7 +1055,7 @@ async syncContacts() {
         }
     }
 
-    // FIXED: Telegram media handling with proper sticker conversion (like watgbridge)
+    // FIXED: Telegram media handling with proper sticker conversion for WhatsApp
     async handleTelegramMedia(msg, mediaType) {
         try {
             const topicId = msg.message_thread_id;
@@ -1074,10 +1140,11 @@ async syncContacts() {
                     break;
 
                 case 'video_note':
+                    // FIXED: Proper video note sending to WhatsApp
                     messageOptions = {
                         video: fs.readFileSync(filePath),
                         caption: caption,
-                        ptv: true, // FIXED: Proper video note flag
+                        ptv: true, // This is the key for video notes
                         viewOnce: hasMediaSpoiler
                     };
                     break;
@@ -1121,28 +1188,34 @@ async syncContacts() {
                     try {
                         const stickerBuffer = fs.readFileSync(filePath);
 
-                        // FIXED: Proper sticker conversion (like watgbridge)
+                        // FIXED: Proper sticker conversion for WhatsApp (512x512, WebP format)
                         const convertedPath = filePath.replace('.webp', '-wa.webp');
+                        
+                        // Convert to WhatsApp sticker format
                         await sharp(stickerBuffer)
                             .resize(512, 512, {
                                 fit: 'contain',
                                 background: { r: 0, g: 0, b: 0, alpha: 0 }
                             })
                             .webp({ 
+                                quality: 100,
                                 lossless: false,
-                                quality: 90,
                                 effort: 6
                             })
                             .toFile(convertedPath);
 
+                        // Read the converted sticker
+                        const convertedBuffer = fs.readFileSync(convertedPath);
+
                         messageOptions = {
-                            sticker: fs.readFileSync(convertedPath)
+                            sticker: convertedBuffer
                         };
 
+                        // Clean up converted file
                         setTimeout(() => fs.unlink(convertedPath).catch(() => {}), 5000);
 
                     } catch (conversionError) {
-                        logger.warn('🧊 Sticker conversion failed, sending as image');
+                        logger.warn('🧊 Sticker conversion failed, sending as image:', conversionError);
 
                         messageOptions = {
                             image: fs.readFileSync(filePath),
@@ -1160,7 +1233,6 @@ async syncContacts() {
                 logger.info(`✅ Successfully sent ${mediaType} to WhatsApp`);
                 await this.setReaction(msg.chat.id, msg.message_id, '👍');
                 
-                // FIXED: Send read receipt (like watgbridge)
                 setTimeout(async () => {
                     await this.markAsRead(whatsappJid, [sendResult.key]);
                 }, 1000);
@@ -1311,21 +1383,18 @@ async syncContacts() {
         }
     }
 
-    // FIXED: WhatsApp event handlers setup (like watgbridge)
     async setupWhatsAppHandlers() {
         if (!this.whatsappBot?.sock) {
             logger.warn('⚠️ WhatsApp socket not available for setting up handlers');
             return;
         }
 
-        // Call event handler
         this.whatsappBot.sock.ev.on('call', async (calls) => {
             for (const call of calls) {
                 await this.handleCallNotification(call);
             }
         });
 
-        // Contact updates handler
         this.whatsappBot.sock.ev.on('contacts.update', async (contacts) => {
             try {
                 let updatedCount = 0;
@@ -1334,12 +1403,15 @@ async syncContacts() {
                         const phone = contact.id.split('@')[0];
                         const oldName = this.contactMappings.get(phone);
                         
-                        if (oldName !== contact.name) {
+                        // Only update if it's a real contact name (not handle name)
+                        if (contact.name !== phone && 
+                            !contact.name.startsWith('+') && 
+                            contact.name.length > 2 &&
+                            oldName !== contact.name) {
                             await this.saveContactMapping(phone, contact.name);
                             logger.info(`📞 Updated contact: ${phone} -> ${contact.name}`);
                             updatedCount++;
                             
-                            // Update topic name if exists
                             const jid = contact.id;
                             if (this.chatMappings.has(jid)) {
                                 const topicId = this.chatMappings.get(jid);
@@ -1355,22 +1427,27 @@ async syncContacts() {
                         }
                     }
                 }
-                logger.info(`✅ Processed ${updatedCount} contact updates`);
-                await this.logToTelegram('✅ Contact Updates Processed', `Updated ${updatedCount} contacts.`);
+                if (updatedCount > 0) {
+                    logger.info(`✅ Processed ${updatedCount} contact updates`);
+                    await this.logToTelegram('✅ Contact Updates Processed', `Updated ${updatedCount} contacts.`);
+                }
             } catch (error) {
                 logger.error('❌ Failed to process contact updates:', error);
                 await this.logToTelegram('❌ Contact Updates Failed', `Error: ${error.message}`);
             }
         });
 
-        // Contacts upsert handler (like watgbridge)
         this.whatsappBot.sock.ev.on('contacts.upsert', async (contacts) => {
             try {
                 let newCount = 0;
                 for (const contact of contacts) {
                     if (contact.id && contact.name) {
                         const phone = contact.id.split('@')[0];
-                        if (!this.contactMappings.has(phone)) {
+                        // Only save real contact names
+                        if (contact.name !== phone && 
+                            !contact.name.startsWith('+') && 
+                            contact.name.length > 2 &&
+                            !this.contactMappings.has(phone)) {
                             await this.saveContactMapping(phone, contact.name);
                             logger.info(`📞 New contact: ${phone} -> ${contact.name}`);
                             newCount++;
