@@ -54,8 +54,7 @@ class TelegramBridge {
             await this.setupTelegramHandlers();
             await this.loadMappingsFromDb();
             
-            // Wait for WhatsApp to be ready before syncing
-            if (this.whatsappBot?.sock?.user) {
+            if (config.get('telegram.autoSyncContacts') !== false) {
                 await this.syncContacts();
                 await this.updateTopicNames();
             }
@@ -65,6 +64,7 @@ class TelegramBridge {
             logger.error('❌ Failed to initialize Telegram bridge:', error);
         }
     }
+
 
     async initializeDatabase() {
         try {
