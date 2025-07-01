@@ -107,7 +107,7 @@ class AdvancedWhatsAppBot {
     }
 
     async onConnectionOpen() {
-        logger.info(`✅ Connected to WhatsApp! User: ${this.sock.user?.id || 'Unknown'}`);
+        logger.info('✅ Connected to WhatsApp!');
         
         // Set owner if not set
         if (!config.get('bot.owner') && this.sock.user) {
@@ -115,26 +115,15 @@ class AdvancedWhatsAppBot {
             logger.info(`👑 Owner set to: ${this.sock.user.id}`);
         }
 
-        // Initialize Telegram bridge after WhatsApp connection
-        if (config.get('telegram.enabled') && config.get('telegram.botToken') && !this.telegramBridge) {
-            try {
-                this.telegramBridge = new TelegramBridge(this);
-                await this.telegramBridge.initialize();
-                await this.telegramBridge.setupWhatsAppHandlers();
-                logger.info('✅ Telegram bridge initialized after WhatsApp connection');
-            } catch (error) {
-                logger.error('❌ Failed to initialize Telegram bridge:', error);
-            }
-        }
-
         // Send startup message to owner
         await this.sendStartupMessage();
         
-        // Notify Telegram bridge of connection
+        // Initialize Telegram bridge connection
         if (this.telegramBridge) {
             await this.telegramBridge.syncWhatsAppConnection();
         }
     }
+
 
     async sendStartupMessage() {
         const owner = config.get('bot.owner');
