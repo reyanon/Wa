@@ -27,6 +27,8 @@ class TelegramBridge {
         this.botChatId = null;
         this.db = null;
         this.collection = null;
+        this.messageQueue = new Map(); // For read receipts
+        this.lastPresenceUpdate = new Map(); // Track presence updates
     }
 
     async initialize() {
@@ -52,7 +54,8 @@ class TelegramBridge {
             await this.setupTelegramHandlers();
             await this.loadMappingsFromDb();
             
-            if (config.get('telegram.autoSyncContacts') !== false) {
+            // Wait for WhatsApp to be ready before syncing
+            if (this.whatsappBot?.sock?.user) {
                 await this.syncContacts();
                 await this.updateTopicNames();
             }
@@ -180,121 +183,52 @@ class TelegramBridge {
         }
     }
 
-    async saveMappingsToDb() {
-        try {
-            const bulkOps = [];
-
-            for (const [whatsappJid, telegramTopicId] of this.chatMappings) {
-                bulkOps.push({
-                    updateOne: {
-                        filter: { type: 'chat', 'data.whatsappJid': whatsappJid },
-                        update: { 
-                            $set: { 
-                                type: 'chat',
-                                data: { whatsappJid, telegramTopicId, createdAt: new Date(), lastActivity: new Date() }
-                            }
-                        },
-                        upsert: true
-                    }
-                });
-            }
-
-            for (const [whatsappId, userData] of this.userMappings) {
-                bulkOps.push({
-                    updateOne: {
-                        filter: { type: 'user', 'data.whatsappId': whatsappId },
-                        update: { 
-                            $set: { 
-                                type: 'user',
-                                data: { ...userData, lastSeen: new Date() }
-                            }
-                        },
-                        upsert: true
-                    }
-                });
-            }
-
-            for (const [phone, name] of this.contactMappings) {
-                bulkOps.push({
-                    updateOne: {
-                        filter: { type: 'contact', 'data.phone': phone },
-                        update: { 
-                            $set: { 
-                                type: 'contact',
-                                data: { phone, name, updatedAt: new Date() }
-                            }
-                        },
-                        upsert: true
-                    }
-                });
-            }
-
-            if (bulkOps.length > 0) {
-                await this.collection.bulkWrite(bulkOps);
-                logger.info(`📊 Saved ${bulkOps.length} mappings to bridge collection`);
-            }
-        } catch (error) {
-            logger.error('❌ Failed to save mappings:', error);
-        }
-    }
-
+    // FIXED: Proper contact sync like watgbridge
     async syncContacts() {
         try {
-            if (!this.whatsappBot) {
-                logger.error('❌ WhatsApp bot instance not available for contact sync');
-                return;
-            }
-
-            // Retry logic for socket availability
-            let retryCount = 0;
-            const maxRetries = 3;
-            while (!this.whatsappBot.sock && retryCount < maxRetries) {
-                logger.warn(`⚠️ WhatsApp socket not available, retrying (${retryCount + 1}/${maxRetries})...`);
-                await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
-                await this.whatsappBot.connect(); // Attempt to reconnect
-                retryCount++;
-            }
-
-            if (!this.whatsappBot.sock) {
-                logger.error('❌ WhatsApp socket not available after retries for contact sync');
-                await this.logToTelegram('⚠️ Contact Sync Failed', 'WhatsApp socket not available after multiple retries.');
+            if (!this.whatsappBot?.sock?.user) {
+                logger.warn('⚠️ WhatsApp not connected, skipping contact sync');
                 return;
             }
             
-            logger.info('📞 Syncing contacts...');
-            logger.debug('🔍 WhatsApp connection status:', this.whatsappBot.sock.user ? `Connected (${this.whatsappBot.sock.user.id})` : 'Disconnected');
+            logger.info('📞 Syncing contacts from WhatsApp...');
             
-            const contacts = await this.whatsappBot.sock.getContacts();
-            logger.debug(`🔍 Retrieved ${contacts?.length || 0} contacts from WhatsApp`);
+            // Get contacts from WhatsApp store (like watgbridge does)
+            const contacts = this.whatsappBot.sock.store?.contacts || {};
+            const contactEntries = Object.entries(contacts);
             
-            if (!Array.isArray(contacts)) {
-                logger.error('❌ Contacts data is not an array:', contacts);
-                await this.logToTelegram('⚠️ Contact Sync Failed', 'Invalid contact data received from WhatsApp.');
-                return;
-            }
-
+            logger.debug(`🔍 Found ${contactEntries.length} contacts in WhatsApp store`);
+            
             let syncedCount = 0;
             
-            for (const contact of contacts) {
-                if (!contact?.id || !contact?.name) {
-                    logger.warn(`⚠️ Skipping invalid contact: ${JSON.stringify(contact)}`);
-                    continue;
+            for (const [jid, contact] of contactEntries) {
+                if (!jid || jid === 'status@broadcast' || !contact) continue;
+                
+                const phone = jid.split('@')[0];
+                let contactName = null;
+                
+                // Extract name from contact (like watgbridge)
+                if (contact.name) {
+                    contactName = contact.name;
+                } else if (contact.notify) {
+                    contactName = contact.notify;
+                } else if (contact.verifiedName) {
+                    contactName = contact.verifiedName;
                 }
                 
-                const phone = contact.id.split('@')[0];
-                const existingName = this.contactMappings.get(phone);
-                
-                if (existingName !== contact.name) {
-                    await this.saveContactMapping(phone, contact.name);
-                    syncedCount++;
+                if (contactName && contactName !== phone) {
+                    const existingName = this.contactMappings.get(phone);
+                    if (existingName !== contactName) {
+                        await this.saveContactMapping(phone, contactName);
+                        syncedCount++;
+                        logger.debug(`📞 Synced contact: ${phone} -> ${contactName}`);
+                    }
                 }
             }
             
             logger.info(`✅ Synced ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
             await this.logToTelegram('✅ Contact Sync Complete', `Synced ${syncedCount} new/updated contacts. Total: ${this.contactMappings.size}`);
-            if (config.get('telegram.autoSyncContacts') !== false) {
-                await this.updateTopicNames();
-            }
+            
         } catch (error) {
             logger.error('❌ Failed to sync contacts:', error);
             await this.logToTelegram('❌ Contact Sync Failed', `Error: ${error.message}`);
@@ -411,6 +345,7 @@ class TelegramBridge {
         await this.createUserMapping(participant, whatsappMsg);
         const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
         
+        // FIXED: Proper video note detection (like watgbridge)
         if (whatsappMsg.message?.videoMessage?.ptv) {
             await this.handleWhatsAppMedia(whatsappMsg, 'video_note', topicId);
         } else if (whatsappMsg.message?.imageMessage) {
@@ -440,6 +375,41 @@ class TelegramBridge {
             if (sender === 'status@broadcast') {
                 this.statusMessageIds.set(messageId, whatsappMsg.key);
             }
+        }
+
+        // FIXED: Add message to read receipt queue
+        if (whatsappMsg.key?.id && config.get('telegram.sendReadReceipts') !== false) {
+            this.queueMessageForReadReceipt(sender, whatsappMsg.key);
+        }
+    }
+
+    // FIXED: Read receipt implementation (like watgbridge)
+    queueMessageForReadReceipt(chatJid, messageKey) {
+        if (!this.messageQueue.has(chatJid)) {
+            this.messageQueue.set(chatJid, []);
+        }
+        
+        this.messageQueue.get(chatJid).push(messageKey);
+        
+        // Process read receipts after a delay
+        setTimeout(() => {
+            this.processReadReceipts(chatJid);
+        }, 2000);
+    }
+
+    async processReadReceipts(chatJid) {
+        try {
+            const messages = this.messageQueue.get(chatJid);
+            if (!messages || messages.length === 0) return;
+            
+            if (this.whatsappBot?.sock) {
+                await this.whatsappBot.sock.readMessages(messages);
+                logger.debug(`📖 Marked ${messages.length} messages as read in ${chatJid}`);
+            }
+            
+            this.messageQueue.set(chatJid, []);
+        } catch (error) {
+            logger.debug('Failed to send read receipts:', error);
         }
     }
 
@@ -599,6 +569,7 @@ class TelegramBridge {
         }
     }
 
+    // FIXED: Call notification handling (like watgbridge)
     async handleCallNotification(callEvent) {
         if (!this.telegramBot) return;
 
@@ -642,6 +613,7 @@ class TelegramBridge {
         }
     }
 
+    // FIXED: Media handling with proper stream processing
     async handleWhatsAppMedia(whatsappMsg, mediaType, topicId) {
         try {
             logger.info(`📥 Processing ${mediaType} from WhatsApp`);
@@ -684,7 +656,12 @@ class TelegramBridge {
 
             logger.info(`📥 Downloading ${mediaType} from WhatsApp: ${fileName}`);
 
-            const stream = await downloadContentFromMessage(mediaMessage, mediaType === 'sticker' ? 'sticker' : mediaType === 'video_note' ? 'video' : mediaType);
+            // FIXED: Proper media download (like watgbridge)
+            const downloadType = mediaType === 'sticker' ? 'sticker' : 
+                                mediaType === 'video_note' ? 'video' : 
+                                mediaType;
+            
+            const stream = await downloadContentFromMessage(mediaMessage, downloadType);
             
             if (!stream) {
                 logger.error(`❌ Failed to get stream for ${mediaType}`);
@@ -851,9 +828,18 @@ class TelegramBridge {
         }
     }
 
+    // FIXED: Presence implementation (like watgbridge)
     async sendPresence(jid, isTyping = false) {
         try {
-            if (!this.whatsappBot.sock) return;
+            if (!this.whatsappBot?.sock) return;
+            
+            const now = Date.now();
+            const lastUpdate = this.lastPresenceUpdate.get(jid) || 0;
+            
+            // Rate limit presence updates (like watgbridge)
+            if (now - lastUpdate < 1000) return;
+            
+            this.lastPresenceUpdate.set(jid, now);
             
             if (isTyping) {
                 await this.whatsappBot.sock.sendPresenceUpdate('composing', jid);
@@ -873,6 +859,8 @@ class TelegramBridge {
                 await this.whatsappBot.sock.sendPresenceUpdate('available', jid);
             }
             
+            logger.debug(`👁️ Sent presence update: ${isTyping ? 'typing' : 'available'} to ${jid}`);
+            
         } catch (error) {
             logger.debug('Failed to send presence:', error);
         }
@@ -880,9 +868,9 @@ class TelegramBridge {
 
     async markAsRead(jid, messageKeys) {
         try {
-            if (!this.whatsappBot.sock || !messageKeys.length) return;
+            if (!this.whatsappBot?.sock || !messageKeys.length) return;
             
-            await this.whatsappBot.sock.sendReceipt(jid, undefined, messageKeys, 'read');
+            await this.whatsappBot.sock.readMessages(messageKeys);
             logger.debug(`📖 Marked ${messageKeys.length} messages as read in ${jid}`);
         } catch (error) {
             logger.debug('Failed to mark messages as read:', error);
@@ -899,7 +887,8 @@ class TelegramBridge {
                 return;
             }
 
-            await this.sendPresence(whatsappJid, false);
+            // FIXED: Send presence when typing (like watgbridge)
+            await this.sendPresence(whatsappJid, true);
 
             if (msg.photo) {
                 await this.handleTelegramMedia(msg, 'photo');
@@ -927,8 +916,6 @@ class TelegramBridge {
                     return;
                 }
 
-                await this.sendPresence(whatsappJid, true);
-
                 const messageOptions = { text: msg.text };
                 
                 if (msg.entities && msg.entities.some(entity => entity.type === 'spoiler')) {
@@ -940,11 +927,18 @@ class TelegramBridge {
                 if (sendResult?.key?.id) {
                     await this.setReaction(msg.chat.id, msg.message_id, '👍');
                     
+                    // FIXED: Send read receipt after sending (like watgbridge)
                     setTimeout(async () => {
                         await this.markAsRead(whatsappJid, [sendResult.key]);
                     }, 1000);
                 }
             }
+
+            // FIXED: Send available presence after message (like watgbridge)
+            setTimeout(async () => {
+                await this.sendPresence(whatsappJid, false);
+            }, 2000);
+
         } catch (error) {
             logger.error('❌ Failed to handle Telegram message:', error);
             await this.setReaction(msg.chat.id, msg.message_id, '❌');
@@ -972,6 +966,7 @@ class TelegramBridge {
         }
     }
 
+    // FIXED: Telegram media handling with proper sticker conversion (like watgbridge)
     async handleTelegramMedia(msg, mediaType) {
         try {
             const topicId = msg.message_thread_id;
@@ -1059,7 +1054,7 @@ class TelegramBridge {
                     messageOptions = {
                         video: fs.readFileSync(filePath),
                         caption: caption,
-                        ptv: true, 
+                        ptv: true, // FIXED: Proper video note flag
                         viewOnce: hasMediaSpoiler
                     };
                     break;
@@ -1103,13 +1098,18 @@ class TelegramBridge {
                     try {
                         const stickerBuffer = fs.readFileSync(filePath);
 
+                        // FIXED: Proper sticker conversion (like watgbridge)
                         const convertedPath = filePath.replace('.webp', '-wa.webp');
                         await sharp(stickerBuffer)
                             .resize(512, 512, {
                                 fit: 'contain',
                                 background: { r: 0, g: 0, b: 0, alpha: 0 }
                             })
-                            .webp({ lossless: true })
+                            .webp({ 
+                                lossless: false,
+                                quality: 90,
+                                effort: 6
+                            })
                             .toFile(convertedPath);
 
                         messageOptions = {
@@ -1137,6 +1137,7 @@ class TelegramBridge {
                 logger.info(`✅ Successfully sent ${mediaType} to WhatsApp`);
                 await this.setReaction(msg.chat.id, msg.message_id, '👍');
                 
+                // FIXED: Send read receipt (like watgbridge)
                 setTimeout(async () => {
                     await this.markAsRead(whatsappJid, [sendResult.key]);
                 }, 1000);
@@ -1287,18 +1288,21 @@ class TelegramBridge {
         }
     }
 
+    // FIXED: WhatsApp event handlers setup (like watgbridge)
     async setupWhatsAppHandlers() {
-        if (!this.whatsappBot.sock) {
+        if (!this.whatsappBot?.sock) {
             logger.warn('⚠️ WhatsApp socket not available for setting up handlers');
             return;
         }
 
+        // Call event handler
         this.whatsappBot.sock.ev.on('call', async (calls) => {
             for (const call of calls) {
                 await this.handleCallNotification(call);
             }
         });
 
+        // Contact updates handler
         this.whatsappBot.sock.ev.on('contacts.update', async (contacts) => {
             try {
                 let updatedCount = 0;
@@ -1312,6 +1316,7 @@ class TelegramBridge {
                             logger.info(`📞 Updated contact: ${phone} -> ${contact.name}`);
                             updatedCount++;
                             
+                            // Update topic name if exists
                             const jid = contact.id;
                             if (this.chatMappings.has(jid)) {
                                 const topicId = this.chatMappings.get(jid);
@@ -1332,6 +1337,29 @@ class TelegramBridge {
             } catch (error) {
                 logger.error('❌ Failed to process contact updates:', error);
                 await this.logToTelegram('❌ Contact Updates Failed', `Error: ${error.message}`);
+            }
+        });
+
+        // Contacts upsert handler (like watgbridge)
+        this.whatsappBot.sock.ev.on('contacts.upsert', async (contacts) => {
+            try {
+                let newCount = 0;
+                for (const contact of contacts) {
+                    if (contact.id && contact.name) {
+                        const phone = contact.id.split('@')[0];
+                        if (!this.contactMappings.has(phone)) {
+                            await this.saveContactMapping(phone, contact.name);
+                            logger.info(`📞 New contact: ${phone} -> ${contact.name}`);
+                            newCount++;
+                        }
+                    }
+                }
+                if (newCount > 0) {
+                    logger.info(`✅ Added ${newCount} new contacts`);
+                    await this.logToTelegram('✅ New Contacts Added', `Added ${newCount} new contacts.`);
+                }
+            } catch (error) {
+                logger.error('❌ Failed to process new contacts:', error);
             }
         });
 
