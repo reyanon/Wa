@@ -26,7 +26,7 @@ class TelegramBridge {
         this.presenceTimeout = null;
         this.botChatId = null;
         this.db = null;
-        this.collection = null;
+        this.collection = null; // Changed to single collection
         this.messageQueue = new Map();
         this.lastPresenceUpdate = new Map();
     }
@@ -71,7 +71,7 @@ class TelegramBridge {
             this.db = await connectDb();
             await this.db.command({ ping: 1 });
             logger.info('✅ MongoDB connection successful');
-            this.collection = this.db.collection('bridge');
+            this.collection = this.db.collection('bridge'); // Single collection
             await this.collection.createIndex({ type: 1, 'data.whatsappJid': 1 }, { unique: true, partialFilterExpression: { type: 'chat' } });
             await this.collection.createIndex({ type: 1, 'data.whatsappId': 1 }, { unique: true, partialFilterExpression: { type: 'user' } });
             await this.collection.createIndex({ type: 1, 'data.phone': 1 }, { unique: true, partialFilterExpression: { type: 'contact' } });
