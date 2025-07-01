@@ -6,7 +6,7 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const TelegramBridge = require('../watg-bridge/bridge');
+const TelegramBridge = require('../watg-bridge/bridge'); // Correct path
 const { connectDb } = require('../utils/db');
 const ModuleLoader = require('./module-loader');
 
@@ -15,7 +15,7 @@ class AdvancedWhatsAppBot {
         this.sock = null;
         this.authPath = './auth_info';
         this.messageHandler = new MessageHandler(this);
-        this.telegramBridge = null;
+        this.telegramBridge = null; // Still null here, will be set in initialize
         this.isShuttingDown = false;
         this.db = null;
         this.moduleLoader = new ModuleLoader(this);
@@ -35,6 +35,17 @@ class AdvancedWhatsAppBot {
 
         // Load modules using the ModuleLoader
         await this.moduleLoader.loadModules();
+
+        // --- ADD THIS BLOCK TO INITIALIZE TELEGRAM BRIDGE ---
+        if (config.get('telegram.enabled')) { // Assuming you have a flag in config to enable/disable Telegram
+            this.telegramBridge = new TelegramBridge(this); // Pass the WhatsApp bot instance
+            await this.telegramBridge.initialize();
+            await this.telegramBridge.setupWhatsAppHandlers(); // Set up WhatsApp handlers *after* WhatsApp socket is initialized
+            logger.info('✅ Telegram bridge setup initiated.');
+        } else {
+            logger.info('⚠️ Telegram bridge is disabled in configuration.');
+        }
+        // --- END ADDITION ---
         
         // Start WhatsApp connection
         await this.startWhatsApp();
