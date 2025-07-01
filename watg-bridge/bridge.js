@@ -192,54 +192,136 @@ async syncContacts() {
         
         logger.info('📞 Syncing contacts from WhatsApp...');
         
-        // DEBUG: Check what's available
-        logger.debug('🔍 WhatsApp sock store:', !!this.whatsappBot.sock.store);
-        logger.debug('🔍 WhatsApp contacts store:', !!this.whatsappBot.sock.store?.contacts);
+        let syncedCount = 0;
+        let contacts = {};
         
-        const contacts = this.whatsappBot.sock.store?.contacts || {};
-        const contactEntries = Object.entries(contacts);
+        // Method 1: Try to get contacts from store
+        if (this.whatsappBot.sock.store?.contacts) {
+            contacts = this.whatsappBot.sock.store.contacts;
+            logger.debug(`🔍 Found ${Object.keys(contacts).length} contacts in store`);
+        }
         
-        logger.debug(`🔍 Found ${contactEntries.length} contacts in WhatsApp store`);
+        // Method 2: Try to get contacts from authState.creds
+        if (Object.keys(contacts).length === 0 && this.whatsappBot.sock.authState?.creds?.contacts) {
+            contacts = this.whatsappBot.sock.authState.creds.contacts;
+            logger.debug(`🔍 Found ${Object.keys(contacts).length} contacts in authState`);
+        }
         
-        // DEBUG: Log first few contacts (without sensitive info)
-        if (contactEntries.length > 0) {
-            logger.debug('🔍 Sample contacts:', contactEntries.slice(0, 3).map(([jid, contact]) => ({
-                jid: jid.substring(0, 10) + '***',
-                hasName: !!contact.name,
-                hasNotify: !!contact.notify,
-                hasVerifiedName: !!contact.verifiedName
-            })));
-        } else {
-            logger.warn('⚠️ No contacts found in WhatsApp store');
-            
-            // Try alternative method to get contacts
+        // Method 3: Try to fetch contacts manually
+        if (Object.keys(contacts).length === 0) {
             try {
-                logger.info('🔄 Attempting to fetch contacts from WhatsApp...');
-                const waContacts = await this.whatsappBot.sock.store.fetchContacts();
-                logger.debug(`🔍 Fetched ${Object.keys(waContacts || {}).length} contacts`);
+                logger.info('🔄 Attempting to fetch contacts manually...');
+                
+                // Get all chats first
+                const chats = this.whatsappBot.sock.store?.chats || {};
+                
+                for (const [jid, chat] of Object.entries(chats)) {
+                    if (jid.endsWith('@s.whatsapp.net') && chat.name) {
+                        const phone = jid.split('@')[0];
+                        contacts[jid] = {
+                            id: jid,
+                            name: chat.name,
+                            notify: chat.name
+                        };
+                    }
+                }
+                
+                // Also try to get contacts from recent messages
+                const messages = this.whatsappBot.sock.store?.messages || {};
+                for (const [chatJid, chatMessages] of Object.entries(messages)) {
+                    if (chatJid.endsWith('@s.whatsapp.net')) {
+                        const messageArray = Array.from(chatMessages.values());
+                        for (const msg of messageArray) {
+                            if (msg.pushName && msg.key.remoteJid === chatJid) {
+                                const phone = chatJid.split('@')[0];
+                                if (!contacts[chatJid]) {
+                                    contacts[chatJid] = {
+                                        id: chatJid,
+                                        name: msg.pushName,
+                                        notify: msg.pushName
+                                    };
+                                }
+                                break; // Only need one message per chat
+                            }
+                        }
+                    }
+                }
+                
+                logger.debug(`🔍 Manually collected ${Object.keys(contacts).length} contacts`);
+                
             } catch (fetchError) {
-                logger.warn('⚠️ Could not fetch contacts:', fetchError.message);
+                logger.warn('⚠️ Could not fetch contacts manually:', fetchError.message);
             }
         }
         
-        let syncedCount = 0;
+        // Method 4: If still no contacts, try using WhatsApp's contact query
+        if (Object.keys(contacts).length === 0) {
+            try {
+                logger.info('🔄 Attempting WhatsApp contact query...');
+                
+                // Get phone numbers from existing chat mappings
+                const phoneNumbers = [];
+                for (const jid of this.chatMappings.keys()) {
+                    if (jid.endsWith('@s.whatsapp.net')) {
+                        phoneNumbers.push(jid.split('@')[0]);
+                    }
+                }
+                
+                if (phoneNumbers.length > 0) {
+                    // Query WhatsApp for these contacts
+                    const contactsQuery = await this.whatsappBot.sock.onWhatsApp(...phoneNumbers.slice(0, 50)); // Limit to 50 at a time
+                    
+                    for (const contact of contactsQuery) {
+                        if (contact.exists) {
+                            const jid = contact.jid;
+                            contacts[jid] = {
+                                id: jid,
+                                name: null, // Will be filled from other sources
+                                notify: null
+                            };
+                        }
+                    }
+                    
+                    logger.debug(`🔍 WhatsApp query returned ${contactsQuery.length} contacts`);
+                }
+                
+            } catch (queryError) {
+                logger.warn('⚠️ WhatsApp contact query failed:', queryError.message);
+            }
+        }
         
+        const contactEntries = Object.entries(contacts);
+        logger.info(`📞 Processing ${contactEntries.length} contacts...`);
+        
+        if (contactEntries.length === 0) {
+            logger.warn('⚠️ No contacts found to sync');
+            await this.logToTelegram('⚠️ Contact Sync Warning', 'No contacts found in WhatsApp store. This might be normal for new accounts.');
+            return;
+        }
+        
+        // Process contacts
         for (const [jid, contact] of contactEntries) {
             if (!jid || jid === 'status@broadcast' || !contact) continue;
+            
+            // Skip group chats
+            if (jid.endsWith('@g.us')) continue;
             
             const phone = jid.split('@')[0];
             let contactName = null;
             
-            // Extract name from contact (like watgbridge)
-            if (contact.name) {
+            // Extract name from contact (priority order)
+            if (contact.name && contact.name !== phone) {
                 contactName = contact.name;
-            } else if (contact.notify) {
+            } else if (contact.notify && contact.notify !== phone) {
                 contactName = contact.notify;
-            } else if (contact.verifiedName) {
+            } else if (contact.verifiedName && contact.verifiedName !== phone) {
                 contactName = contact.verifiedName;
+            } else if (contact.pushName && contact.pushName !== phone) {
+                contactName = contact.pushName;
             }
             
-            if (contactName && contactName !== phone) {
+            // Only save if we have a meaningful name
+            if (contactName && contactName !== phone && contactName.trim() !== '') {
                 const existingName = this.contactMappings.get(phone);
                 if (existingName !== contactName) {
                     await this.saveContactMapping(phone, contactName);
@@ -249,14 +331,73 @@ async syncContacts() {
             }
         }
         
-        logger.info(`✅ Synced ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
-        await this.logToTelegram('✅ Contact Sync Complete', `Synced ${syncedCount} new/updated contacts. Total: ${this.contactMappings.size}`);
+        // Also sync from user mappings (people who have sent messages)
+        for (const [whatsappId, userData] of this.userMappings.entries()) {
+            if (userData.name && userData.phone) {
+                const existingName = this.contactMappings.get(userData.phone);
+                if (existingName !== userData.name) {
+                    await this.saveContactMapping(userData.phone, userData.name);
+                    syncedCount++;
+                    logger.debug(`📞 Synced from user mapping: ${userData.phone} -> ${userData.name}`);
+                }
+            }
+        }
+        
+        logger.info(`✅ Contact sync complete: ${syncedCount} new/updated contacts (Total: ${this.contactMappings.size})`);
+        await this.logToTelegram('✅ Contact Sync Complete', 
+            `Synced ${syncedCount} new/updated contacts.\n` +
+            `Total contacts: ${this.contactMappings.size}\n` +
+            `WhatsApp contacts found: ${contactEntries.length}`
+        );
         
     } catch (error) {
         logger.error('❌ Failed to sync contacts:', error);
         await this.logToTelegram('❌ Contact Sync Failed', `Error: ${error.message}`);
     }
 }
+
+// Add this new method to force contact refresh
+async forceContactSync() {
+    try {
+        logger.info('🔄 Forcing contact sync...');
+        
+        // Clear existing contacts to force refresh
+        this.contactMappings.clear();
+        
+        // Wait a bit for WhatsApp to be ready
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Try to refresh the store
+        if (this.whatsappBot.sock.store) {
+            try {
+                // Force refresh contacts if method exists
+                if (typeof this.whatsappBot.sock.store.fetchContacts === 'function') {
+                    await this.whatsappBot.sock.store.fetchContacts();
+                }
+            } catch (error) {
+                logger.debug('Could not refresh store contacts:', error.message);
+            }
+        }
+        
+        // Now sync contacts
+        await this.syncContacts();
+        
+    } catch (error) {
+        logger.error('❌ Failed to force contact sync:', error);
+    }
+}
+
+// Add this method to sync contacts periodically
+startPeriodicContactSync() {
+    // Sync contacts every 30 minutes
+    setInterval(async () => {
+        logger.info('🔄 Periodic contact sync...');
+        await this.syncContacts();
+    }, 30 * 60 * 1000); // 30 minutes
+    
+    logger.info('⏰ Periodic contact sync started (every 30 minutes)');
+}
+
 
     async updateTopicNames() {
         try {
