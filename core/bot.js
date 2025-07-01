@@ -6,7 +6,7 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 const MessageHandler = require('./message-handler');
-const TelegramBridge = require('../watg-bridge/bridge'); // Correct path
+const TelegramBridge = require('../watg-bridge/bridge');
 const { connectDb } = require('../utils/db');
 const ModuleLoader = require('./module-loader');
 
@@ -15,7 +15,7 @@ class AdvancedWhatsAppBot {
         this.sock = null;
         this.authPath = './auth_info';
         this.messageHandler = new MessageHandler(this);
-        this.telegramBridge = null; // Still null here, will be set in initialize
+        this.telegramBridge = null;
         this.isShuttingDown = false;
         this.db = null;
         this.moduleLoader = new ModuleLoader(this);
@@ -35,17 +35,6 @@ class AdvancedWhatsAppBot {
 
         // Load modules using the ModuleLoader
         await this.moduleLoader.loadModules();
-
-        // --- ADD THIS BLOCK TO INITIALIZE TELEGRAM BRIDGE ---
-        if (config.get('telegram.enabled')) { // Assuming you have a flag in config to enable/disable Telegram
-            this.telegramBridge = new TelegramBridge(this); // Pass the WhatsApp bot instance
-            await this.telegramBridge.initialize();
-            await this.telegramBridge.setupWhatsAppHandlers(); // Set up WhatsApp handlers *after* WhatsApp socket is initialized
-            logger.info('✅ Telegram bridge setup initiated.');
-        } else {
-            logger.info('⚠️ Telegram bridge is disabled in configuration.');
-        }
-        // --- END ADDITION ---
         
         // Start WhatsApp connection
         await this.startWhatsApp();
@@ -118,7 +107,7 @@ class AdvancedWhatsAppBot {
     }
 
     async onConnectionOpen() {
-        logger.info('✅ Connected to WhatsApp!');
+        logger.info(`✅ Connected to WhatsApp! User: ${this.sock.user?.id || 'Unknown'}`);
         
         // Set owner if not set
         if (!config.get('bot.owner') && this.sock.user) {
@@ -126,15 +115,26 @@ class AdvancedWhatsAppBot {
             logger.info(`👑 Owner set to: ${this.sock.user.id}`);
         }
 
+        // Initialize Telegram bridge after WhatsApp connection
+        if (config.get('telegram.enabled') && config.get('telegram.botToken') && !this.telegramBridge) {
+            try {
+                this.telegramBridge = new TelegramBridge(this);
+                await this.telegramBridge.initialize();
+                await this.telegramBridge.setupWhatsAppHandlers();
+                logger.info('✅ Telegram bridge initialized after WhatsApp connection');
+            } catch (error) {
+                logger.error('❌ Failed to initialize Telegram bridge:', error);
+            }
+        }
+
         // Send startup message to owner
         await this.sendStartupMessage();
         
-        // Initialize Telegram bridge connection
+        // Notify Telegram bridge of connection
         if (this.telegramBridge) {
             await this.telegramBridge.syncWhatsAppConnection();
         }
     }
-
 
     async sendStartupMessage() {
         const owner = config.get('bot.owner');
