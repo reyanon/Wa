@@ -1156,12 +1156,12 @@ class TelegramBridge {
                     };
                     break;
                     
-if (mediaType === 'sticker') {
+case 'sticker':
     await this.handleTelegramSticker(msg);
-    return;
-}
+    return; // stop further handling, it's done inside handleTelegramSticker()
+    break;
+} // <-- add this to close the switch
 
-            }
 
             sendResult = await this.whatsappBot.sendMessage(whatsappJid, messageOptions);
 
@@ -1240,7 +1240,6 @@ async handleTelegramSticker(msg) {
         } else {
             throw new Error('Sticker sent but no confirmation');
         }
-
     } catch (err) {
         logger.error('❌ Failed to send sticker to WhatsApp:', err);
         await this.setReaction(chatId, msg.message_id, '❌');
@@ -1254,7 +1253,7 @@ async handleTelegramSticker(msg) {
         });
         await fs.unlink(fallbackPath).catch(() => {});
     }
-}
+} // ← This closing bracket was missing for handleTelegramSticker
 
 async convertAnimatedSticker(inputPath) {
     const outputPath = inputPath.replace('.webp', '-converted.webp');
