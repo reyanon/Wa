@@ -606,7 +606,7 @@ class TelegramBridge {
     }
 
     async handleCallNotification(callEvent) {
-        if (!this.telegramBot) return;
+        if (!this.telegramBot || !config.get('telegram.features.callLogs')) return;
 
         const callerId = callEvent.from;
         const callKey = `${callerId}_${callEvent.id}`;
@@ -648,7 +648,6 @@ class TelegramBridge {
         }
     }
 
-    // FIXED: Media handling with proper video note detection
     async handleWhatsAppMedia(whatsappMsg, mediaType, topicId, isOutgoing = false) {
         try {
             logger.info(`📥 Processing ${mediaType} from WhatsApp`);
@@ -667,7 +666,7 @@ class TelegramBridge {
                     fileName += '.mp4';
                     break;
                 case 'video_note':
-                    mediaMessage = whatsappMsg.message.videoMessage;
+                    mediaMessage = whatsappMsg.message.ptvMessage || whatsappMsg.message.videoMessage;
                     fileName += '.mp4';
                     break;
                 case 'audio':
@@ -717,7 +716,6 @@ class TelegramBridge {
             const sender = whatsappMsg.key.remoteJid;
             const participant = whatsappMsg.key.participant || sender;
             
-            // FIXED: Handle outgoing messages properly
             if (isOutgoing) {
                 caption = caption ? `📤 You: ${caption}` : '📤 You sent media';
             } else if (sender.endsWith('@g.us') && participant !== sender) {
@@ -751,14 +749,19 @@ class TelegramBridge {
                     break;
 
                 case 'video_note':
-                    // FIXED: Proper video note handling
-                    await this.telegramBot.sendVideoNote(chatId, filePath, {
+                    // Convert to circular video note format for Telegram
+                    const videoNotePath = await this.convertToVideoNote(filePath);
+                    await this.telegramBot.sendVideoNote(chatId, videoNotePath, {
                         message_thread_id: topicId
                     });
                     if (caption) {
                         await this.telegramBot.sendMessage(chatId, caption, {
                             message_thread_id: topicId
                         });
+                    }
+                    // Clean up converted file
+                    if (videoNotePath !== filePath) {
+                        await fs.unlink(videoNotePath).catch(() => {});
                     }
                     break;
                     
@@ -809,6 +812,26 @@ class TelegramBridge {
         } catch (error) {
             logger.error(`❌ Failed to handle WhatsApp ${mediaType}:`, error);
         }
+    }
+
+    async convertToVideoNote(inputPath) {
+        return new Promise((resolve, reject) => {
+            const outputPath = inputPath.replace('.mp4', '_note.mp4');
+            
+            ffmpeg(inputPath)
+                .videoFilter('scale=240:240:force_original_aspect_ratio=increase,crop=240:240')
+                .duration(60) // Limit to 60 seconds for video notes
+                .format('mp4')
+                .on('end', () => {
+                    logger.debug('Video note conversion completed');
+                    resolve(outputPath);
+                })
+                .on('error', (err) => {
+                    logger.debug('Video note conversion failed:', err);
+                    resolve(inputPath); // Return original if conversion fails
+                })
+                .save(outputPath);
+        });
     }
 
     async handleWhatsAppLocation(whatsappMsg, topicId, isOutgoing = false) {
@@ -1132,45 +1155,11 @@ class TelegramBridge {
                     };
                     break;
                     
-                case 'sticker':
-                    try {
-                        const stickerBuffer = fs.readFileSync(filePath);
+if (mediaType === 'sticker') {
+    await this.handleTelegramSticker(msg);
+    return;
+}
 
-                        // FIXED: Proper sticker conversion for WhatsApp (512x512, WebP format)
-                        const convertedPath = filePath.replace('.webp', '-wa.webp');
-                        
-                        // Convert to WhatsApp sticker format
-                        await sharp(stickerBuffer)
-                            .resize(512, 512, {
-                                fit: 'contain',
-                                background: { r: 0, g: 0, b: 0, alpha: 0 }
-                            })
-                            .webp({ 
-                                quality: 100,
-                                lossless: false,
-                                effort: 6
-                            })
-                            .toFile(convertedPath);
-
-                        // Read the converted sticker
-                        const convertedBuffer = fs.readFileSync(convertedPath);
-
-                        messageOptions = {
-                            sticker: convertedBuffer
-                        };
-
-                        // Clean up converted file
-                        setTimeout(() => fs.unlink(convertedPath).catch(() => {}), 5000);
-
-                    } catch (conversionError) {
-                        logger.warn('🧊 Sticker conversion failed, sending as image:', conversionError);
-
-                        messageOptions = {
-                            image: fs.readFileSync(filePath),
-                            caption: 'Sticker'
-                        };
-                    }
-                    break;
             }
 
             sendResult = await this.whatsappBot.sendMessage(whatsappJid, messageOptions);
@@ -1194,6 +1183,99 @@ class TelegramBridge {
             await this.setReaction(msg.chat.id, msg.message_id, '❌');
         }
     }
+
+async handleTelegramSticker(msg) {
+    const topicId = msg.message_thread_id;
+    const whatsappJid = this.findWhatsAppJidByTopic(topicId);
+    const chatId = msg.chat.id;
+
+    if (!whatsappJid) {
+        logger.warn('⚠️ Could not find WhatsApp chat for Telegram sticker');
+        return;
+    }
+
+    try {
+        await this.sendPresence(whatsappJid, 'composing');
+
+        const fileId = msg.sticker.file_id;
+        const fileLink = await this.telegramBot.getFileLink(fileId);
+        const stickerBuffer = (await axios.get(fileLink, { responseType: 'arraybuffer' })).data;
+        const fileName = `sticker_${Date.now()}`;
+        const inputPath = path.join(this.tempDir, `${fileName}.webp`);
+        await fs.writeFile(inputPath, stickerBuffer);
+
+        let outputBuffer;
+
+        // Detect animated sticker type
+        const isAnimated = msg.sticker.is_animated || msg.sticker.is_video;
+
+        if (isAnimated) {
+            const animatedPath = await this.convertAnimatedSticker(inputPath);
+            if (animatedPath) {
+                outputBuffer = await fs.readFile(animatedPath);
+                await fs.unlink(animatedPath).catch(() => {});
+            } else {
+                throw new Error('Animated sticker conversion failed');
+            }
+        } else {
+            const sticker = new Sticker(stickerBuffer, {
+                type: StickerTypes.FULL,
+                pack: 'Telegram Stickers',
+                author: 'BridgeBot',
+                quality: 100
+            });
+            outputBuffer = await sticker.toBuffer();
+        }
+
+        const result = await this.whatsappBot.sendMessage(whatsappJid, {
+            sticker: outputBuffer
+        });
+
+        await fs.unlink(inputPath).catch(() => {});
+
+        if (result?.key?.id) {
+            logger.info('✅ Sticker sent to WhatsApp');
+            await this.setReaction(chatId, msg.message_id, '👍');
+        } else {
+            throw new Error('Sticker sent but no confirmation');
+        }
+
+    } catch (err) {
+        logger.error('❌ Failed to send sticker to WhatsApp:', err);
+        await this.setReaction(chatId, msg.message_id, '❌');
+
+        // Fallback: send as photo
+        const fallbackPath = path.join(this.tempDir, `fallback_${Date.now()}.png`);
+        await sharp(stickerBuffer).resize(512, 512).png().toFile(fallbackPath);
+        await this.telegramBot.sendPhoto(chatId, fallbackPath, {
+            message_thread_id: topicId,
+            caption: 'Sticker (fallback)'
+        });
+        await fs.unlink(fallbackPath).catch(() => {});
+    }
+}
+
+async convertAnimatedSticker(inputPath) {
+    const outputPath = inputPath.replace('.webp', '-converted.webp');
+
+    return new Promise((resolve, reject) => {
+        ffmpeg(inputPath)
+            .outputOptions([
+                '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000',
+                '-loop', '0',
+                '-an',
+                '-vsync', '0'
+            ])
+            .outputFormat('webp')
+            .on('end', () => resolve(outputPath))
+            .on('error', (err) => {
+                logger.debug('Animated sticker conversion failed:', err.message);
+                resolve(null); // fallback
+            })
+            .save(outputPath);
+    });
+}
+
 
     async handleTelegramLocation(msg) {
         try {
