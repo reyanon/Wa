@@ -336,7 +336,6 @@ class TelegramBridge {
         }
     }
 
-    // FIXED: Message sync with proper sender detection
     async syncMessage(whatsappMsg, text) {
         if (!this.telegramBot || !config.get('telegram.enabled')) return;
 
@@ -344,9 +343,7 @@ class TelegramBridge {
         const participant = whatsappMsg.key.participant || sender;
         const isFromMe = whatsappMsg.key.fromMe;
         
-        // FIXED: Don't create topics for messages sent by me
         if (isFromMe) {
-            // For outgoing messages, just sync to existing topic if it exists
             const existingTopicId = this.chatMappings.get(sender);
             if (existingTopicId) {
                 await this.syncOutgoingMessage(whatsappMsg, text, existingTopicId, sender);
@@ -357,8 +354,7 @@ class TelegramBridge {
         await this.createUserMapping(participant, whatsappMsg);
         const topicId = await this.getOrCreateTopic(sender, whatsappMsg);
         
-        // FIXED: Proper video note detection
-        if (whatsappMsg.message?.videoMessage?.ptv) {
+        if (whatsappMsg.message?.ptvMessage || (whatsappMsg.message?.videoMessage?.ptv)) {
             await this.handleWhatsAppMedia(whatsappMsg, 'video_note', topicId);
         } else if (whatsappMsg.message?.imageMessage) {
             await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId);
@@ -389,15 +385,14 @@ class TelegramBridge {
             }
         }
 
-        if (whatsappMsg.key?.id && config.get('telegram.sendReadReceipts') !== false) {
+        if (whatsappMsg.key?.id && config.get('telegram.features.readReceipts') !== false) {
             this.queueMessageForReadReceipt(sender, whatsappMsg.key);
         }
     }
 
-    // FIXED: Handle outgoing messages properly
     async syncOutgoingMessage(whatsappMsg, text, topicId, sender) {
         try {
-            if (whatsappMsg.message?.videoMessage?.ptv) {
+            if (whatsappMsg.message?.ptvMessage || (whatsappMsg.message?.videoMessage?.ptv)) {
                 await this.handleWhatsAppMedia(whatsappMsg, 'video_note', topicId, true);
             } else if (whatsappMsg.message?.imageMessage) {
                 await this.handleWhatsAppMedia(whatsappMsg, 'image', topicId, true);
@@ -423,6 +418,8 @@ class TelegramBridge {
     }
 
     queueMessageForReadReceipt(chatJid, messageKey) {
+        if (!config.get('telegram.features.readReceipts')) return;
+        
         if (!this.messageQueue.has(chatJid)) {
             this.messageQueue.set(chatJid, []);
         }
@@ -433,6 +430,7 @@ class TelegramBridge {
             this.processReadReceipts(chatJid);
         }, 2000);
     }
+
 
     async processReadReceipts(chatJid) {
         try {
