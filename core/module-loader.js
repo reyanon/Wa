@@ -1,6 +1,9 @@
+
 const path = require('path');
 const fs = require('fs-extra');
-const logger = require('./logger'); // Adjusted path based on typical project structure
+const logger = require('./logger');
+const config = require('../config');
+const helpers = require('../utils/helpers');
 
 class ModuleLoader {
     constructor(bot) {
@@ -8,11 +11,183 @@ class ModuleLoader {
         this.modules = new Map();
         this.systemModulesCount = 0;
         this.customModulesCount = 0;
+        this.setupModuleCommands();
+    }
+
+    setupModuleCommands() {
+        // Load Module Command
+        const loadModuleCommand = {
+            name: 'lm',
+            description: 'Load a module from file',
+            usage: '.lm (reply to a .js file)',
+            permissions: 'owner',
+            execute: async (msg, params, context) => {
+                if (!msg.message?.documentMessage?.fileName?.endsWith('.js')) {
+                    return context.bot.sendMessage(context.sender, {
+                        text: '🔧 *Load Module*\n\n❌ Please reply to a JavaScript (.js) file to load it as a module.'
+                    });
+                }
+
+                try {
+                    const processingMsg = await context.bot.sendMessage(context.sender, {
+                        text: '⚡ *Loading Module*\n\n🔄 Downloading and installing module...\n⏳ Please wait...'
+                    });
+
+                    const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
+                    const stream = await downloadContentFromMessage(msg.message.documentMessage, 'document');
+                    
+                    const chunks = [];
+                    for await (const chunk of stream) {
+                        chunks.push(chunk);
+                    }
+                    const buffer = Buffer.concat(chunks);
+                    
+                    const fileName = msg.message.documentMessage.fileName;
+                    const customModulesPath = path.join(__dirname, '../custom_modules');
+                    await fs.ensureDir(customModulesPath);
+                    
+                    const filePath = path.join(customModulesPath, fileName);
+                    await fs.writeFile(filePath, buffer);
+                    
+                    await this.loadModule(filePath, false);
+                    
+                    await context.bot.sock.sendMessage(context.sender, {
+                        text: `✅ *Module Loaded Successfully*\n\n📦 Module: \`${fileName}\`\n📁 Location: Custom Modules\n🎯 Status: Active\n⏰ ${new Date().toLocaleTimeString()}`,
+                        edit: processingMsg.key
+                    });
+
+                } catch (error) {
+                    logger.error('Failed to load module:', error);
+                    await context.bot.sendMessage(context.sender, {
+                        text: `❌ *Module Load Failed*\n\n🚫 Error: ${error.message}\n🔧 Please check the module file format.`
+                    });
+                }
+            }
+        };
+
+        // Unload Module Command
+        const unloadModuleCommand = {
+            name: 'ulm',
+            description: 'Unload a module',
+            usage: '.ulm <module_name>',
+            permissions: 'owner',
+            execute: async (msg, params, context) => {
+                if (params.length === 0) {
+                    const moduleList = this.listModules().join('\n• ');
+                    return context.bot.sendMessage(context.sender, {
+                        text: `🔧 *Unload Module*\n\n📋 Available modules:\n• ${moduleList}\n\n💡 Usage: \`.ulm <module_name>\``
+                    });
+                }
+
+                const moduleName = params[0];
+                
+                try {
+                    const processingMsg = await context.bot.sendMessage(context.sender, {
+                        text: `⚡ *Unloading Module*\n\n🔄 Removing: \`${moduleName}\`\n⏳ Please wait...`
+                    });
+
+                    await this.unloadModule(moduleName);
+                    
+                    await context.bot.sock.sendMessage(context.sender, {
+                        text: `✅ *Module Unloaded Successfully*\n\n📦 Module: \`${moduleName}\`\n🗑️ Status: Removed\n⏰ ${new Date().toLocaleTimeString()}`,
+                        edit: processingMsg.key
+                    });
+
+                } catch (error) {
+                    logger.error('Failed to unload module:', error);
+                    await context.bot.sendMessage(context.sender, {
+                        text: `❌ *Module Unload Failed*\n\n🚫 Error: ${error.message}\n📦 Module: \`${moduleName}\``
+                    });
+                }
+            }
+        };
+
+        // Reload Module Command
+        const reloadModuleCommand = {
+            name: 'rlm',
+            description: 'Reload a module',
+            usage: '.rlm <module_name>',
+            permissions: 'owner',
+            execute: async (msg, params, context) => {
+                if (params.length === 0) {
+                    const moduleList = this.listModules().join('\n• ');
+                    return context.bot.sendMessage(context.sender, {
+                        text: `🔧 *Reload Module*\n\n📋 Available modules:\n• ${moduleList}\n\n💡 Usage: \`.rlm <module_name>\``
+                    });
+                }
+
+                const moduleName = params[0];
+                
+                try {
+                    const processingMsg = await context.bot.sendMessage(context.sender, {
+                        text: `⚡ *Reloading Module*\n\n🔄 Restarting: \`${moduleName}\`\n⏳ Please wait...`
+                    });
+
+                    await this.reloadModule(moduleName);
+                    
+                    await context.bot.sock.sendMessage(context.sender, {
+                        text: `✅ *Module Reloaded Successfully*\n\n📦 Module: \`${moduleName}\`\n🔄 Status: Restarted\n⏰ ${new Date().toLocaleTimeString()}`,
+                        edit: processingMsg.key
+                    });
+
+                } catch (error) {
+                    logger.error('Failed to reload module:', error);
+                    await context.bot.sendMessage(context.sender, {
+                        text: `❌ *Module Reload Failed*\n\n🚫 Error: ${error.message}\n📦 Module: \`${moduleName}\``
+                    });
+                }
+            }
+        };
+
+        // List Modules Command
+        const listModulesCommand = {
+            name: 'modules',
+            description: 'List all loaded modules',
+            usage: '.modules',
+            permissions: 'public',
+            execute: async (msg, params, context) => {
+                const systemModules = [];
+                const customModules = [];
+                
+                for (const [name, moduleInfo] of this.modules) {
+                    if (moduleInfo.isSystem) {
+                        systemModules.push(name);
+                    } else {
+                        customModules.push(name);
+                    }
+                }
+
+                let moduleText = `🔧 *Loaded Modules*\n\n`;
+                moduleText += `📊 **System Modules (${systemModules.length}):**\n`;
+                if (systemModules.length > 0) {
+                    moduleText += `• ${systemModules.join('\n• ')}\n\n`;
+                } else {
+                    moduleText += `• None loaded\n\n`;
+                }
+                
+                moduleText += `🎨 **Custom Modules (${customModules.length}):**\n`;
+                if (customModules.length > 0) {
+                    moduleText += `• ${customModules.join('\n• ')}\n\n`;
+                } else {
+                    moduleText += `• None loaded\n\n`;
+                }
+                
+                moduleText += `📈 **Total:** ${this.modules.size} modules active`;
+
+                await context.bot.sendMessage(context.sender, { text: moduleText });
+            }
+        };
+
+        // Register module management commands
+        this.bot.messageHandler.registerCommandHandler('lm', loadModuleCommand);
+        this.bot.messageHandler.registerCommandHandler('ulm', unloadModuleCommand);
+        this.bot.messageHandler.registerCommandHandler('rlm', reloadModuleCommand);
+        this.bot.messageHandler.registerCommandHandler('modules', listModulesCommand);
     }
 
     async loadModules() {
         const systemPath = path.join(__dirname, '../modules');
-        const customPath = path.join(__dirname, '../custom_modules'); // Assuming this is the custom modules folder
+        const customPath = path.join(__dirname, '../custom_modules');
 
         await fs.ensureDir(systemPath);
         await fs.ensureDir(customPath);
@@ -22,8 +197,8 @@ class ModuleLoader {
             fs.readdir(customPath)
         ]);
 
-        this.systemModulesCount = 0; // Reset counts for fresh load
-        this.customModulesCount = 0; // Reset counts for fresh load
+        this.systemModulesCount = 0;
+        this.customModulesCount = 0;
 
         for (const file of systemFiles) {
             if (file.endsWith('.js')) {
@@ -37,9 +212,124 @@ class ModuleLoader {
             }
         }
 
+        // Load help system after all modules
+        this.setupHelpSystem();
+
         logger.info(`✅ Loaded ${this.systemModulesCount} System Modules.`);
         logger.info(`✅ Loaded ${this.customModulesCount} Custom Modules.`);
         logger.info(`✅ Total Modules Loaded: ${this.systemModulesCount + this.customModulesCount}`);
+    }
+
+    setupHelpSystem() {
+        const helpCommand = {
+            name: 'help',
+            description: 'Show all available modules and commands or detailed help for a specific module',
+            usage: '.help [module_name]',
+            permissions: 'public',
+            execute: async (msg, params, context) => {
+                if (params.length > 0) {
+                    // Show detailed help for a specific module
+                    const moduleName = params[0].toLowerCase();
+                    const moduleInfo = this.getModule(moduleName);
+
+                    if (!moduleInfo) {
+                        await context.bot.sendMessage(context.sender, {
+                            text: `❌ Module \`${moduleName}\` not found.\n\nUse \`.help\` to see all available modules.`
+                        });
+                        return;
+                    }
+
+                    const metadata = moduleInfo.metadata || {};
+                    const commands = Array.isArray(moduleInfo.commands) ? moduleInfo.commands : [];
+                    let helpText = `📦 *Module: ${moduleName}*\n\n`;
+                    helpText += `📝 *Description*: ${metadata.description || 'No description available'}\n`;
+                    helpText += `🆚 *Version*: ${metadata.version || 'Unknown'}\n`;
+                    helpText += `👤 *Author*: ${metadata.author || 'Unknown'}\n`;
+                    helpText += `📂 *Category*: ${metadata.category || 'Uncategorized'}\n`;
+                    helpText += `📁 *Type*: ${this.modules.get(moduleName)?.isSystem ? 'System' : 'Custom'}\n\n`;
+
+                    if (commands.length > 0) {
+                        helpText += `📋 *Commands* (${commands.length}):\n`;
+                        for (const cmd of commands) {
+                            helpText += `  • \`${cmd.name}\` - ${cmd.description}\n`;
+                            helpText += `    Usage: \`${cmd.usage}\`\n`;
+                            helpText += `    Permissions: ${cmd.permissions || 'public'}\n`;
+                        }
+                    } else {
+                        helpText += `📋 *Commands*: None\n`;
+                    }
+
+                    await context.bot.sendMessage(context.sender, { text: helpText });
+                    return;
+                }
+
+                // Show all modules and their commands
+                let helpText = `🤖 *${config.get('bot.name')} Help Menu*\n\n`;
+                helpText += `🎯 *Prefix*: \`${config.get('bot.prefix')}\`\n`;
+                helpText += `📊 *Total Modules*: ${this.modules.size}\n`;
+                helpText += `📋 *Total Commands*: ${this.bot.messageHandler.commandHandlers.size}\n\n`;
+
+                const systemModules = [];
+                const customModules = [];
+
+                for (const [name, moduleInfo] of this.modules) {
+                    if (moduleInfo.isSystem) {
+                        systemModules.push({ name, instance: moduleInfo.instance });
+                    } else {
+                        customModules.push({ name, instance: moduleInfo.instance });
+                    }
+                }
+
+                // System Modules
+                helpText += `📊 *System Modules* (${systemModules.length}):\n`;
+                if (systemModules.length > 0) {
+                    for (const mod of systemModules) {
+                        const commands = Array.isArray(mod.instance.commands) ? mod.instance.commands : [];
+                        helpText += `  📦 ${mod.name} (${commands.length} commands)\n`;
+                        for (const cmd of commands) {
+                            helpText += `    • \`${cmd.name}\` - ${cmd.description} (Usage: \`${cmd.usage}\`)\n`;
+                        }
+                    }
+                } else {
+                    helpText += `  • None loaded\n`;
+                }
+                helpText += `\n`;
+
+                // Custom Modules
+                helpText += `🎨 *Custom Modules* (${customModules.length}):\n`;
+                if (customModules.length > 0) {
+                    for (const mod of customModules) {
+                        const commands = Array.isArray(mod.instance.commands) ? mod.instance.commands : [];
+                        helpText += `  📦 ${mod.name} (${commands.length} commands)\n`;
+                        for (const cmd of commands) {
+                            helpText += `    • \`${cmd.name}\` - ${cmd.description} (Usage: \`${cmd.usage}\`)\n`;
+                        }
+                    }
+                } else {
+                    helpText += `  • None loaded\n`;
+                }
+
+                helpText += `\n💡 *Tip*: Use \`.help <module_name>\` for detailed module info\n`;
+                helpText += `🔧 *Module Management*: \`.lm\`, \`.ulm\`, \`.rlm\`, \`.modules\`, \`.moduleinfo\`, \`.allmodules\``;
+
+                await context.bot.sendMessage(context.sender, { text: helpText });
+            }
+        };
+
+        this.bot.messageHandler.registerCommandHandler('help', helpCommand);
+    }
+
+    getCommandModule(commandName) {
+        for (const [moduleName, moduleInfo] of this.modules) {
+            if (moduleInfo.instance.commands) {
+                for (const cmd of moduleInfo.instance.commands) {
+                    if (cmd.name === commandName) {
+                        return moduleName;
+                    }
+                }
+            }
+        }
+        return 'Core System';
     }
 
     async loadModule(filePath, isSystem) {
@@ -49,27 +339,52 @@ class ModuleLoader {
             delete require.cache[require.resolve(filePath)];
             const mod = require(filePath);
 
-            // If the module exports a class, instantiate it. Otherwise, assume it's a direct object.
             const moduleInstance = typeof mod === 'function' && /^\s*class\s/.test(mod.toString()) 
                                    ? new mod(this.bot) 
                                    : mod;
 
-            // Use module's own name if available, for better logging
             const actualModuleId = (moduleInstance && moduleInstance.name) ? moduleInstance.name : moduleId;
 
-            // Initialize module if it has an init method
+            // Validate module structure
+            if (!moduleInstance.metadata) {
+                moduleInstance.metadata = {
+                    description: 'No description provided',
+                    version: 'Unknown',
+                    author: 'Unknown',
+                    category: 'Uncategorized',
+                    dependencies: []
+                };
+            }
+
             if (moduleInstance.init && typeof moduleInstance.init === 'function') {
                 await moduleInstance.init();
             }
 
-            // Register commands if they exist and are an array
             if (Array.isArray(moduleInstance.commands)) {
                 for (const cmd of moduleInstance.commands) {
-                    this.bot.messageHandler.registerCommandHandler(cmd.name, cmd);
+                    if (!cmd.name || !cmd.description || !cmd.usage || !cmd.execute) {
+                        logger.warn(`⚠️ Invalid command in module ${actualModuleId}: ${JSON.stringify(cmd)}`);
+                        continue;
+                    }
+
+                    const ui = cmd.ui || {};
+
+                    const wrappedCmd = cmd.autoWrap === false ? cmd : {
+                        ...cmd,
+                        execute: async (msg, params, context) => {
+                            await helpers.smartErrorRespond(context.bot, msg, {
+                                processingText: ui.processingText || `⏳ Running *${cmd.name}*...`,
+                                errorText: ui.errorText || `❌ *${cmd.name}* failed.`,
+                                actionFn: async () => {
+                                    return await cmd.execute(msg, params, context);
+                                }
+                            });
+                        }
+                    };
+
+                    this.bot.messageHandler.registerCommandHandler(cmd.name, wrappedCmd);
                 }
             }
-
-            // Register messageHooks if they exist and are an object
             if (moduleInstance.messageHooks && typeof moduleInstance.messageHooks === 'object' && moduleInstance.messageHooks !== null) {
                 for (const [hook, fn] of Object.entries(moduleInstance.messageHooks)) {
                     this.bot.messageHandler.registerMessageHook(hook, fn.bind(moduleInstance));
@@ -94,8 +409,6 @@ class ModuleLoader {
         }
     }
 
-    // Removed checkModuleStructure as requested
-
     getModule(name) {
         return this.modules.get(name)?.instance || null;
     }
@@ -110,22 +423,20 @@ class ModuleLoader {
             throw new Error(`Module ${moduleId} not found`);
         }
 
-        // Call destroy method if it exists for cleanup
         if (moduleInfo.instance.destroy && typeof moduleInfo.instance.destroy === 'function') {
             await moduleInfo.instance.destroy();
         }
 
-        // Unregister commands/hooks (you might need more sophisticated unregistration in messageHandler)
         if (Array.isArray(moduleInfo.instance.commands)) {
             for (const cmd of moduleInfo.instance.commands) {
-                if (cmd.name) { // Basic check for command name
-                    this.bot.messageHandler.unregisterCommandHandler(cmd.name); // Assuming this method exists
+                if (cmd.name) {
+                    this.bot.messageHandler.unregisterCommandHandler(cmd.name);
                 }
             }
         }
         if (moduleInfo.instance.messageHooks && typeof moduleInfo.instance.messageHooks === 'object') {
             for (const hook of Object.keys(moduleInfo.instance.messageHooks)) {
-                this.bot.messageHandler.unregisterMessageHook(hook); // Assuming this method exists
+                this.bot.messageHandler.unregisterMessageHook(hook);
             }
         }
 
@@ -141,8 +452,8 @@ class ModuleLoader {
         }
         
         logger.info(`🔄 Reloading module: ${moduleId}`);
-        await this.unloadModule(moduleId); // Unload first
-        await this.loadModule(moduleInfo.path, moduleInfo.isSystem); // Then load again
+        await this.unloadModule(moduleId);
+        await this.loadModule(moduleInfo.path, moduleInfo.isSystem);
         logger.info(`✅ Reloaded module: ${moduleId}`);
     }
 }
