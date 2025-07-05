@@ -6,7 +6,7 @@ const helpers = require('../utils/helpers');
 class CoreCommands {
     constructor(bot) {
         this.bot = bot;
-        this.name = 'core';
+        this.name = 'bot';
         this.metadata = {
             description: 'Core bot commands for basic functionality',
             version: '1.0.0',
