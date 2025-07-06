@@ -346,6 +346,12 @@ class TelegramBridge {
         const participant = whatsappMsg.key.participant || sender;
         const isFromMe = whatsappMsg.key.fromMe;
         
+        // Handle status messages
+        if (sender === 'status@broadcast') {
+            await this.handleStatusMessage(whatsappMsg, text);
+            return;
+        }
+        
         if (isFromMe) {
             const existingTopicId = this.chatMappings.get(sender);
             if (existingTopicId) {
@@ -381,15 +387,59 @@ class TelegramBridge {
                 messageText = `👤 ${senderName}:\n${text}`;
             }
             
-            const messageId = await this.sendSimpleMessage(topicId, messageText, sender);
-            
-            if (sender === 'status@broadcast') {
-                this.statusMessageIds.set(messageId, whatsappMsg.key);
-            }
+            await this.sendSimpleMessage(topicId, messageText, sender);
         }
 
         if (whatsappMsg.key?.id && config.get('telegram.features.readReceipts') !== false) {
             this.queueMessageForReadReceipt(sender, whatsappMsg.key);
+        }
+    }
+
+    // FIXED: Handle status messages properly
+    async handleStatusMessage(whatsappMsg, text) {
+        try {
+            if (!config.get('telegram.features.statusSync')) return;
+            
+            const participant = whatsappMsg.key.participant;
+            const phone = participant.split('@')[0];
+            const contactName = this.contactMappings.get(phone) || `+${phone}`;
+            
+            // Get or create status topic
+            const topicId = await this.getOrCreateTopic('status@broadcast', whatsappMsg);
+            if (!topicId) return;
+            
+            // Create single status message with all info
+            let statusText = `📱 *Status from ${contactName}* (+${phone})\n`;
+            statusText += `⏰ ${new Date().toLocaleString()}\n\n`;
+            
+            if (text) {
+                statusText += text;
+            }
+            
+            const chatId = config.get('telegram.chatId');
+            
+            // Handle media status
+            const mediaType = this.getMediaType(whatsappMsg);
+            if (mediaType && mediaType !== 'text') {
+                await this.forwardStatusMedia(whatsappMsg, topicId, statusText, mediaType);
+            } else {
+                // Send text status
+                const sentMsg = await this.telegramBot.sendMessage(chatId, statusText, {
+                    message_thread_id: topicId,
+                    parse_mode: 'Markdown'
+                });
+                
+                // Store mapping for status reply
+                this.statusMessageMapping.set(sentMsg.message_id, whatsappMsg.key);
+            }
+            
+            // Auto-view status if enabled
+            if (config.get('features.autoViewStatus')) {
+                await this.whatsappBot.sock.readMessages([whatsappMsg.key]);
+            }
+            
+        } catch (error) {
+            logger.error('❌ Error handling status message:', error);
         }
     }
 
@@ -941,6 +991,8 @@ class TelegramBridge {
         }
     }
 
+
+
     async handleTelegramMessage(msg) {
         try {
             const topicId = msg.message_thread_id;
@@ -951,7 +1003,13 @@ class TelegramBridge {
                 return;
             }
 
-            await this.sendPresence(whatsappJid, true);
+            await this.sendTypingPresence(whatsappJid);
+
+            // FIXED: Handle status replies
+            if (whatsappJid === 'status@broadcast' && msg.reply_to_message) {
+                await this.handleStatusReply(msg);
+                return;
+            }
 
             if (msg.photo) {
                 await this.handleTelegramMedia(msg, 'photo');
@@ -974,11 +1032,6 @@ class TelegramBridge {
             } else if (msg.contact) {
                 await this.handleTelegramContact(msg);
             } else if (msg.text) {
-                if (whatsappJid === 'status@broadcast' && msg.reply_to_message) {
-                    await this.handleStatusReply(msg);
-                    return;
-                }
-
                 const messageOptions = { text: msg.text };
                 
                 if (msg.entities && msg.entities.some(entity => entity.type === 'spoiler')) {
@@ -997,7 +1050,7 @@ class TelegramBridge {
             }
 
             setTimeout(async () => {
-                await this.sendPresence(whatsappJid, false);
+                await this.sendPresence(whatsappJid, 'available');
             }, 2000);
 
         } catch (error) {
@@ -1006,26 +1059,114 @@ class TelegramBridge {
         }
     }
 
+    // FIXED: Status reply handling
     async handleStatusReply(msg) {
         try {
-            const originalStatusKey = this.statusMessageIds.get(msg.reply_to_message.message_id);
+            const originalStatusKey = this.statusMessageMapping.get(msg.reply_to_message.message_id);
             if (!originalStatusKey) {
-                await this.telegramBot.sendMessage(msg.chat.id, '❌ Cannot find original status message to reply to', {
+                await this.telegramBot.sendMessage(msg.chat.id, '❌ Cannot find original status to reply to', {
                     message_thread_id: msg.message_thread_id
                 });
                 return;
             }
 
-            const statusJid = originalStatusKey.participant || originalStatusKey.remoteJid;
-            await this.whatsappBot.sendMessage(statusJid, { text: msg.text });
+            const statusJid = originalStatusKey.participant;
+            const phone = statusJid.split('@')[0];
+            const contactName = this.contactMappings.get(phone) || `+${phone}`;
 
-            await this.setReaction(msg.chat.id, msg.message_id, '✅');
+            const messageOptions = {
+                text: msg.text,
+                contextInfo: {
+                    quotedMessage: originalStatusKey.message,
+                    stanzaId: originalStatusKey.id,
+                    participant: originalStatusKey.participant,
+                    remoteJid: 'status@broadcast'
+                }
+            };
+
+            const sendResult = await this.whatsappBot.sendMessage(statusJid, messageOptions);
+
+            if (sendResult?.key?.id) {
+                await this.telegramBot.sendMessage(msg.chat.id, `✅ Status reply sent to ${contactName}`, {
+                    message_thread_id: msg.message_thread_id
+                });
+                await this.setReaction(msg.chat.id, msg.message_id, '✅');
+                logger.info(`✅ Sent status reply to ${statusJid} for ${contactName}`);
+            } else {
+                throw new Error('Failed to send status reply');
+            }
             
         } catch (error) {
             logger.error('❌ Failed to handle status reply:', error);
+            await this.telegramBot.sendMessage(msg.chat.id, `❌ Failed to send reply to ${contactName}`, {
+                message_thread_id: msg.message_thread_id
+            });
             await this.setReaction(msg.chat.id, msg.message_id, '❌');
         }
     }
+
+    async forwardStatusMedia(whatsappMsg, topicId, caption, mediaType) {
+        try {
+            const stream = await downloadContentFromMessage(
+                whatsappMsg.message[`${mediaType}Message`], 
+                mediaType
+            );
+            
+            const buffer = await this.streamToBuffer(stream);
+            const chatId = config.get('telegram.chatId');
+            
+            let sentMsg;
+            switch (mediaType) {
+                case 'image':
+                    sentMsg = await this.telegramBot.sendPhoto(chatId, buffer, {
+                        message_thread_id: topicId,
+                        caption: caption,
+                        parse_mode: 'Markdown'
+                    });
+                    break;
+                case 'video':
+                    sentMsg = await this.telegramBot.sendVideo(chatId, buffer, {
+                        message_thread_id: topicId,
+                        caption: caption,
+                        parse_mode: 'Markdown'
+                    });
+                    break;
+                case 'audio':
+                    sentMsg = await this.telegramBot.sendAudio(chatId, buffer, {
+                        message_thread_id: topicId,
+                        caption: caption,
+                        parse_mode: 'Markdown'
+                    });
+                    break;
+            }
+            
+            // Store mapping for status reply
+            if (sentMsg) {
+                this.statusMessageMapping.set(sentMsg.message_id, whatsappMsg.key);
+            }
+            
+        } catch (error) {
+            logger.error('❌ Error forwarding status media:', error);
+            // Fallback to text
+            const sentMsg = await this.telegramBot.sendMessage(config.get('telegram.chatId'), caption, {
+                message_thread_id: topicId,
+                parse_mode: 'Markdown'
+            });
+            this.statusMessageMapping.set(sentMsg.message_id, whatsappMsg.key);
+        }
+    }
+
+    getMediaType(msg) {
+        if (msg.message?.imageMessage) return 'image';
+        if (msg.message?.videoMessage) return 'video';
+        if (msg.message?.audioMessage) return 'audio';
+        if (msg.message?.documentMessage) return 'document';
+        if (msg.message?.stickerMessage) return 'sticker';
+        if (msg.message?.locationMessage) return 'location';
+        if (msg.message?.contactMessage) return 'contact';
+        return 'text';
+    }
+
 
     // FIXED: Telegram media handling with proper sticker conversion for WhatsApp
     async handleTelegramMedia(msg, mediaType) {
