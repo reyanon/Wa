@@ -33,9 +33,9 @@ class Helpers {
             // Run command
             const result = await actionFn();
 
-            // Wait 1s then remove ⏳
+            // Wait 1.5s then remove ⏳
             if (autoReact) {
-                await Helpers.sleep(1000);
+                await Helpers.sleep(1500);
                 await bot.sock.sendMessage(sender, {
                     react: { key: originalMsg.key, text: '' }
                 });
